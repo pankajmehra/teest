@@ -1,0 +1,14 @@
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models
+{
+    public class GroupHoldoverRow
+    {
+        public int GroupHoldoverId { get; set; }
+        public string? Source { get; set; }
+        public int EmployerGroupId { get; set; }
+        public string? EmployerGroupUd { get; set; }
+        public string? GroupContractUd { get; set; }
+        public string? BenefitPlanUd { get; set; }
+        public DateTime? EffectiveDate { get; set; }
+        public DateTime? ThruDate { get; set; }
+    }
+}
