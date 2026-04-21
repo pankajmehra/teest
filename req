@@ -1,0 +1,53 @@
+Search bar at the top of page will have the following search fields:
+Group holdover id
+Source – required field - autopopulate "mcrdc"
+Parent employer group ud - search form that pulls all available parent employer groups to choose from
+Employer group ud - search form that pulls all available employer groups to choose from
+Group contract ud- search form that pulls all available group contracts under the employer group ud chosen (intuitive list)
+Benefit plan ud - search form that pulls all available benefit plans under the employer group ud chosen (intuitive list)
+Eff date from - date picker or manual entry
+Eff date thru - date picker or manual entry
+Comment
+
+
+Column names will include the following when viewing records
+Columns will need to have sorting feature
+Group holdover id
+Source 
+Employer group id
+Employer group ud 
+Group contract id 
+Benefit plan id
+Eff date from 
+Thru date
+Use received date 
+Use incurred date 
+Comment 
+Created date 
+Created user,
+Modified date
+Modified user
+Deleted
+
+"Add" button that the user can click on to insert a new row with all applicable fields.
+
+Column names will include the following:
+Source – required field - autopopulate "mcrdc"
+Employer ud – required field if no group contract ud or benefit plan ud- search form that pulls all available employer groups to choose from
+Group contract ud – required if no employer group ud and no benefit plan ud
+Benefit plan ud – required if no group contract ud or employer group ud
+Eff date from – required – date picker or manual entry
+Eff date thru – required – date picker or manual entry
+Use received date versus incurred date – required field
+"0" (Zero) – not being used
+"-1" – is being used.
+Comment – required field and completely user defined
+
+Group config will have edit access.  Everyone else will have read only access. Both read only and edit access will be able to use search section at the top of the page. Add button will be disabled or non-existent for read only access.
+
+
+
+Tool will not allow duplicate records to be entered.  Tool will populate error message stating "Duplicate Record Found".
+After error message populates:
+The record that the user was trying to add will be replaced by the identified duplicate record for the user to then modify and save.
+
