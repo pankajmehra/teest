@@ -1,53 +1,160 @@
-Search bar at the top of page will have the following search fields:
-Group holdover id
-Source – required field - autopopulate "mcrdc"
-Parent employer group ud - search form that pulls all available parent employer groups to choose from
-Employer group ud - search form that pulls all available employer groups to choose from
-Group contract ud- search form that pulls all available group contracts under the employer group ud chosen (intuitive list)
-Benefit plan ud - search form that pulls all available benefit plans under the employer group ud chosen (intuitive list)
-Eff date from - date picker or manual entry
-Eff date thru - date picker or manual entry
-Comment
+<Page
+    x:Class="WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.HoldoverTable"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:CommunityToolkit.WinUI.UI.Controls"
+    mc:Ignorable="d">
 
+    <Page.Resources>
+        <ResourceDictionary Source="ms-appx:///Microsoft.UI.Xaml/DensityStyles/Compact.xaml" />
+    </Page.Resources>
 
-Column names will include the following when viewing records
-Columns will need to have sorting feature
-Group holdover id
-Source 
-Employer group id
-Employer group ud 
-Group contract id 
-Benefit plan id
-Eff date from 
-Thru date
-Use received date 
-Use incurred date 
-Comment 
-Created date 
-Created user,
-Modified date
-Modified user
-Deleted
+    <Grid Padding="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition/>
+        </Grid.RowDefinitions>
 
-"Add" button that the user can click on to insert a new row with all applicable fields.
+        <!-- First row: Search criteria + buttons -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
 
-Column names will include the following:
-Source – required field - autopopulate "mcrdc"
-Employer ud – required field if no group contract ud or benefit plan ud- search form that pulls all available employer groups to choose from
-Group contract ud – required if no employer group ud and no benefit plan ud
-Benefit plan ud – required if no group contract ud or employer group ud
-Eff date from – required – date picker or manual entry
-Eff date thru – required – date picker or manual entry
-Use received date versus incurred date – required field
-"0" (Zero) – not being used
-"-1" – is being used.
-Comment – required field and completely user defined
+            <!-- Left side: search criteria -->
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-Group config will have edit access.  Everyone else will have read only access. Both read only and edit access will be able to use search section at the top of the page. Add button will be disabled or non-existent for read only access.
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition MaxWidth="260"/>
+                    <ColumnDefinition Width="20"/>
+                    <ColumnDefinition MaxWidth="260"/>
+                </Grid.ColumnDefinitions>
 
+                <!-- Row 0 -->
+                <TextBox x:Name="ParentEmployerGroupUdTextBox"
+                         Grid.Row="0" Grid.Column="0"
+                         Header="Parent Employer Group UD"
+                         Text="{x:Bind ViewModel.SearchCriteria.ParentEmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
+                <TextBox x:Name="EmployerGroupUdTextBox"
+                         Grid.Row="0" Grid.Column="2"
+                         Header="Employer Group UD"
+                         Text="{x:Bind ViewModel.SearchCriteria.EmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
-Tool will not allow duplicate records to be entered.  Tool will populate error message stating "Duplicate Record Found".
-After error message populates:
-The record that the user was trying to add will be replaced by the identified duplicate record for the user to then modify and save.
+                <!-- Row 1 -->
+                <TextBox x:Name="GroupContractUdTextBox"
+                         Grid.Row="1" Grid.Column="0"
+                         Header="Group Contract UD"
+                         Margin="0 6 0 0"
+                         Text="{x:Bind ViewModel.SearchCriteria.GroupContractUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
+                <TextBox x:Name="BenefitPlanUdTextBox"
+                         Grid.Row="1" Grid.Column="2"
+                         Header="Benefit Plan UD"
+                         Margin="0 6 0 0"
+                         Text="{x:Bind ViewModel.SearchCriteria.BenefitPlanUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <!-- Row 2 -->
+                <DatePicker x:Name="EffectiveDatePicker"
+                            Grid.Row="2" Grid.Column="0"
+                            Header="Effective Date"
+                            Margin="0 6 0 0"
+                            Date="{x:Bind ViewModel.SearchCriteria.EffectiveDate, Mode=TwoWay}" />
+
+                <DatePicker x:Name="ThruDatePicker"
+                            Grid.Row="2" Grid.Column="2"
+                            Header="Thru Date"
+                            Margin="0 6 0 0"
+                            Date="{x:Bind ViewModel.SearchCriteria.ThruDate, Mode=TwoWay}" />
+            </Grid>
+
+            <!-- Right side: buttons -->
+            <StackPanel Grid.Column="1" Margin="16 25 0 0">
+                <Button x:Name="SearchButton"
+                        Width="100"
+                        Content="Search"
+                        Command="{x:Bind ViewModel.SearchCommand}"
+                        Style="{StaticResource AccentButtonStyle}" />
+
+                <Button x:Name="ClearButton"
+                        Width="100"
+                        Content="Clear"
+                        Margin="0 5 0 0"
+                        Click="ClearButton_Click" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Second row: result count -->
+        <Grid Grid.Row="1">
+            <TextBlock Text="{x:Bind ViewModel.SearchResultCount, Mode=OneWay}"
+                       Margin="3 3 0 0"/>
+        </Grid>
+
+        <!-- Third row: data grid -->
+        <controls:DataGrid x:Name="DataGrid"
+                           Grid.Row="2"
+                           Margin="0 10 0 5"
+                           ItemsSource="{x:Bind ViewModel.GroupHoldovers}"
+                           SelectedItem="{x:Bind ViewModel.SelectedGroupHoldover, Mode=TwoWay}"
+                           VerticalAlignment="Stretch"
+                           HorizontalAlignment="Stretch"
+                           HorizontalScrollBarVisibility="Visible"
+                           VerticalScrollBarVisibility="Visible"
+                           AutoGenerateColumns="False"
+                           CanUserSortColumns="True"
+                           CanUserReorderColumns="False"
+                           CanUserResizeColumns="True"
+                           ColumnHeaderHeight="32"
+                           GridLinesVisibility="None"
+                           HeadersVisibility="Column"
+                           IsReadOnly="True"
+                           SelectionMode="Single">
+
+            <controls:DataGrid.Resources>
+                <SolidColorBrush x:Key="DataGridCellFocusVisualPrimaryBrush" Color="Transparent"/>
+                <SolidColorBrush x:Key="DataGridCellFocusVisualSecondaryBrush" Color="Transparent"/>
+            </controls:DataGrid.Resources>
+
+            <controls:DataGrid.Columns>
+                <controls:DataGridTextColumn Header="Group Holdover ID" Tag="GroupHoldoverId" Binding="{Binding GroupHoldoverId}" MinWidth="120"/>
+                <controls:DataGridTextColumn Header="Source" Tag="Source" Binding="{Binding Source}" MinWidth="100"/>
+                <controls:DataGridTextColumn Header="Employergroup ID" Tag="EmployerGroupId" Binding="{Binding EmployerGroupId}" MinWidth="140"/>
+                <controls:DataGridTextColumn Header="Employergroup UD" Tag="EmployerGroupUd" Binding="{Binding EmployerGroupUd}" MinWidth="180"/>
+                <controls:DataGridTextColumn Header="Group Contract UD" Tag="GroupContractUd" Binding="{Binding GroupContractUd}" MinWidth="180"/>
+                <controls:DataGridTextColumn Header="Benefit Plan UD" Tag="BenefitPlanUd" Binding="{Binding BenefitPlanUd}" MinWidth="160"/>
+                <controls:DataGridTextColumn Header="Effective Date" Tag="EffectiveDate" Binding="{Binding EffectiveDate}" MinWidth="120"/>
+                <controls:DataGridTextColumn Header="Thru Date" Tag="ThruDate" Binding="{Binding ThruDate}" MinWidth="120"/>
+            </controls:DataGrid.Columns>
+        </controls:DataGrid>
+
+        <!-- Loading overlay -->
+        <Grid Grid.Row="2" Visibility="{x:Bind ViewModel.SearchCommand.IsRunning, Mode=OneWay}">
+            <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Opacity=".8"/>
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Orientation="Horizontal">
+                <ProgressRing Margin="0 0 10 0"
+                              Width="25"
+                              Height="25"
+                              VerticalAlignment="Center"/>
+                <TextBlock Text="Searching..."
+                           FontSize="14"
+                           VerticalAlignment="Center"/>
+                <Button Content="Cancel"
+                        Margin="5 0 0 0"
+                        Width="65"
+                        Click="{x:Bind ViewModel.SearchCommand.Cancel}"
+                        VerticalAlignment="Center"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Page>
