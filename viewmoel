@@ -1,0 +1,82 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Windows.Input;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public class HoldoverTableViewModel : INotifyPropertyChanged
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+        public GroupHoldoverSearchCriteria SearchCriteria { get; set; } = new();
+
+        public ObservableCollection<GroupHoldoverRow> GroupHoldovers { get; set; } = new();
+
+        private GroupHoldoverRow? _selected;
+        public GroupHoldoverRow? SelectedGroupHoldover
+        {
+            get => _selected;
+            set { _selected = value; OnPropertyChanged(); }
+        }
+
+        private string _errorMessage = "";
+        public string ErrorMessage
+        {
+            get => _errorMessage;
+            set { _errorMessage = value; OnPropertyChanged(); }
+        }
+
+        public string SearchResultCount => $"{GroupHoldovers.Count} result(s)";
+
+        public ICommand SearchCommand { get; }
+
+        public HoldoverTableViewModel()
+        {
+            SearchCommand = new RelayCommand(async () => await ExecuteSearch());
+        }
+
+        private async Task ExecuteSearch()
+        {
+            if (!SearchCriteria.HasAtLeastOneCriteria())
+            {
+                ErrorMessage = "Enter at least one search criteria.";
+                return;
+            }
+
+            ErrorMessage = string.Empty;
+
+            // TODO: Replace with real API call
+            await Task.Delay(500);
+
+            GroupHoldovers.Clear();
+
+            // Mock data for now
+            GroupHoldovers.Add(new GroupHoldoverRow
+            {
+                GroupHoldoverId = 123,
+                Source = "MCRDC",
+                EmployerGroupId = 456,
+                EmployerGroupUd = "ABC123",
+                GroupContractUd = "GC001",
+                BenefitPlanUd = "BP001",
+                EffectiveDate = DateTime.Now,
+                ThruDate = DateTime.Now.AddDays(30)
+            });
+
+            OnPropertyChanged(nameof(SearchResultCount));
+        }
+
+        public void Clear()
+        {
+            SearchCriteria.Reset();
+            GroupHoldovers.Clear();
+            ErrorMessage = string.Empty;
+            OnPropertyChanged(nameof(SearchResultCount));
+        }
+    }
+}
