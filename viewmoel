@@ -1,19 +1,193 @@
-public DateTimeOffset EffectiveDateValue
+<!-- ===================== XAML ===================== -->
+
+<AutoSuggestBox x:Name="ParentEmployerGroupUdTextBox"
+                Grid.Row="0"
+                Grid.Column="0"
+                Header="Parent Employer Group UD"
+                Text="{x:Bind ViewModel.SearchCriteria.ParentEmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextChanged="AutoSuggest_TextChanged"
+                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                QuerySubmitted="AutoSuggest_QuerySubmitted"
+                Tag="Parent"
+                DisplayMemberPath="DisplayText">
+    <AutoSuggestBox.QueryIcon>
+        <SymbolIcon Symbol="Find"/>
+    </AutoSuggestBox.QueryIcon>
+</AutoSuggestBox>
+
+<AutoSuggestBox x:Name="EmployerGroupUdTextBox"
+                Grid.Row="0"
+                Grid.Column="2"
+                Header="Employer Group UD"
+                Text="{x:Bind ViewModel.SearchCriteria.EmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextChanged="AutoSuggest_TextChanged"
+                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                QuerySubmitted="AutoSuggest_QuerySubmitted"
+                Tag="Employer"
+                DisplayMemberPath="DisplayText">
+    <AutoSuggestBox.QueryIcon>
+        <SymbolIcon Symbol="Find"/>
+    </AutoSuggestBox.QueryIcon>
+</AutoSuggestBox>
+
+<AutoSuggestBox x:Name="GroupContractUdTextBox"
+                Grid.Row="1"
+                Grid.Column="0"
+                Header="Group Contract UD"
+                Text="{x:Bind ViewModel.SearchCriteria.GroupContractUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextChanged="AutoSuggest_TextChanged"
+                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                QuerySubmitted="AutoSuggest_QuerySubmitted"
+                Tag="Contract"
+                DisplayMemberPath="DisplayText">
+    <AutoSuggestBox.QueryIcon>
+        <SymbolIcon Symbol="Find"/>
+    </AutoSuggestBox.QueryIcon>
+</AutoSuggestBox>
+
+<AutoSuggestBox x:Name="BenefitPlanUdTextBox"
+                Grid.Row="1"
+                Grid.Column="2"
+                Header="Benefit Plan UD"
+                Text="{x:Bind ViewModel.SearchCriteria.BenefitPlanUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextChanged="AutoSuggest_TextChanged"
+                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                QuerySubmitted="AutoSuggest_QuerySubmitted"
+                Tag="Benefit"
+                DisplayMemberPath="DisplayText">
+    <AutoSuggestBox.QueryIcon>
+        <SymbolIcon Symbol="Find"/>
+    </AutoSuggestBox.QueryIcon>
+</AutoSuggestBox>
+
+// ===================== MODEL =====================
+
+public class LookupSuggestion
 {
-    get => SearchCriteria.EffectiveDate ?? DateTimeOffset.Now;
-    set => SearchCriteria.EffectiveDate = value;
+    public string? Id { get; set; }
+    public string? DisplayText { get; set; }
 }
 
-public DateTimeOffset ThruDateValue
+// ===================== CODE BEHIND =====================
+
+private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
 {
-    get => SearchCriteria.ThruDate ?? DateTimeOffset.Now;
-    set => SearchCriteria.ThruDate = value;
+    if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+        return;
+
+    var text = sender.Text?.Trim() ?? string.Empty;
+
+    if (text.Length < 4)
+    {
+        sender.ItemsSource = null;
+        return;
+    }
+
+    List<LookupSuggestion> results = sender.Tag switch
+    {
+        "Parent" => await ViewModel.GetParentSuggestionsAsync(text),
+        "Employer" => await ViewModel.GetEmployerSuggestionsAsync(text),
+        "Contract" => await ViewModel.GetContractSuggestionsAsync(text),
+        "Benefit" => await ViewModel.GetBenefitSuggestionsAsync(text),
+        _ => new List<LookupSuggestion>()
+    };
+
+    sender.ItemsSource = results;
 }
 
-<DatePicker
-    Header="Effective Date"
-    Date="{x:Bind ViewModel.EffectiveDateValue, Mode=TwoWay}" />
+private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+{
+    if (args.SelectedItem is not LookupSuggestion item)
+        return;
 
-<DatePicker
-    Header="Thru Date"
-    Date="{x:Bind ViewModel.ThruDateValue, Mode=TwoWay}" />
+    sender.Text = item.DisplayText;
+
+    switch (sender.Tag)
+    {
+        case "Parent":
+            ViewModel.SearchCriteria.ParentEmployerGroupUd = item.DisplayText;
+            break;
+        case "Employer":
+            ViewModel.SearchCriteria.EmployerGroupUd = item.DisplayText;
+            break;
+        case "Contract":
+            ViewModel.SearchCriteria.GroupContractUd = item.DisplayText;
+            break;
+        case "Benefit":
+            ViewModel.SearchCriteria.BenefitPlanUd = item.DisplayText;
+            break;
+    }
+
+    ViewModel.RefreshCanSearch();
+}
+
+private void AutoSuggest_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+{
+    string value = args.ChosenSuggestion is LookupSuggestion item
+        ? item.DisplayText!
+        : sender.Text;
+
+    switch (sender.Tag)
+    {
+        case "Parent":
+            ViewModel.SearchCriteria.ParentEmployerGroupUd = value;
+            break;
+        case "Employer":
+            ViewModel.SearchCriteria.EmployerGroupUd = value;
+            break;
+        case "Contract":
+            ViewModel.SearchCriteria.GroupContractUd = value;
+            break;
+        case "Benefit":
+            ViewModel.SearchCriteria.BenefitPlanUd = value;
+            break;
+    }
+
+    ViewModel.RefreshCanSearch();
+}
+
+// ===================== VIEWMODEL =====================
+
+public async Task<List<LookupSuggestion>> GetParentSuggestionsAsync(string text)
+{
+    await Task.Delay(200);
+    return FakeData(text);
+}
+
+public async Task<List<LookupSuggestion>> GetEmployerSuggestionsAsync(string text)
+{
+    await Task.Delay(200);
+    return FakeData(text);
+}
+
+public async Task<List<LookupSuggestion>> GetContractSuggestionsAsync(string text)
+{
+    await Task.Delay(200);
+    return FakeData(text);
+}
+
+public async Task<List<LookupSuggestion>> GetBenefitSuggestionsAsync(string text)
+{
+    await Task.Delay(200);
+    return FakeData(text);
+}
+
+private List<LookupSuggestion> FakeData(string text)
+{
+    var all = new List<LookupSuggestion>
+    {
+        new() { Id = "1", DisplayText = "ABCD1001" },
+        new() { Id = "2", DisplayText = "ABCD1002" },
+        new() { Id = "3", DisplayText = "XYZ2001" },
+        new() { Id = "4", DisplayText = "TEST3001" }
+    };
+
+    return all
+        .Where(x => x.DisplayText!.Contains(text, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+}
+
+public void RefreshCanSearch()
+{
+    OnPropertyChanged(nameof(CanSearch));
+}
