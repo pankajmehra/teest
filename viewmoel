@@ -1,193 +1,600 @@
-<!-- ===================== XAML ===================== -->
-
-<AutoSuggestBox x:Name="ParentEmployerGroupUdTextBox"
-                Grid.Row="0"
-                Grid.Column="0"
-                Header="Parent Employer Group UD"
-                Text="{x:Bind ViewModel.SearchCriteria.ParentEmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="AutoSuggest_TextChanged"
-                SuggestionChosen="AutoSuggest_SuggestionChosen"
-                QuerySubmitted="AutoSuggest_QuerySubmitted"
-                Tag="Parent"
-                DisplayMemberPath="DisplayText">
-    <AutoSuggestBox.QueryIcon>
-        <SymbolIcon Symbol="Find"/>
-    </AutoSuggestBox.QueryIcon>
-</AutoSuggestBox>
-
-<AutoSuggestBox x:Name="EmployerGroupUdTextBox"
-                Grid.Row="0"
-                Grid.Column="2"
-                Header="Employer Group UD"
-                Text="{x:Bind ViewModel.SearchCriteria.EmployerGroupUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="AutoSuggest_TextChanged"
-                SuggestionChosen="AutoSuggest_SuggestionChosen"
-                QuerySubmitted="AutoSuggest_QuerySubmitted"
-                Tag="Employer"
-                DisplayMemberPath="DisplayText">
-    <AutoSuggestBox.QueryIcon>
-        <SymbolIcon Symbol="Find"/>
-    </AutoSuggestBox.QueryIcon>
-</AutoSuggestBox>
-
-<AutoSuggestBox x:Name="GroupContractUdTextBox"
-                Grid.Row="1"
-                Grid.Column="0"
-                Header="Group Contract UD"
-                Text="{x:Bind ViewModel.SearchCriteria.GroupContractUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="AutoSuggest_TextChanged"
-                SuggestionChosen="AutoSuggest_SuggestionChosen"
-                QuerySubmitted="AutoSuggest_QuerySubmitted"
-                Tag="Contract"
-                DisplayMemberPath="DisplayText">
-    <AutoSuggestBox.QueryIcon>
-        <SymbolIcon Symbol="Find"/>
-    </AutoSuggestBox.QueryIcon>
-</AutoSuggestBox>
-
-<AutoSuggestBox x:Name="BenefitPlanUdTextBox"
-                Grid.Row="1"
-                Grid.Column="2"
-                Header="Benefit Plan UD"
-                Text="{x:Bind ViewModel.SearchCriteria.BenefitPlanUd, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="AutoSuggest_TextChanged"
-                SuggestionChosen="AutoSuggest_SuggestionChosen"
-                QuerySubmitted="AutoSuggest_QuerySubmitted"
-                Tag="Benefit"
-                DisplayMemberPath="DisplayText">
-    <AutoSuggestBox.QueryIcon>
-        <SymbolIcon Symbol="Find"/>
-    </AutoSuggestBox.QueryIcon>
-</AutoSuggestBox>
-
-// ===================== MODEL =====================
-
-public class LookupSuggestion
+// ==========================
+// Models/GroupHoldoverEditModel.cs
+// ==========================
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models
 {
-    public string? Id { get; set; }
-    public string? DisplayText { get; set; }
-}
-
-// ===================== CODE BEHIND =====================
-
-private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
-{
-    if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
-        return;
-
-    var text = sender.Text?.Trim() ?? string.Empty;
-
-    if (text.Length < 4)
+    public class GroupHoldoverEditModel
     {
-        sender.ItemsSource = null;
-        return;
+        public string? ParentEmployerGroupUd { get; set; }
+        public string? EmployerGroupUd { get; set; }
+        public string? GroupContractUd { get; set; }
+        public string? BenefitPlanUd { get; set; }
+        public DateTimeOffset? EffectiveDate { get; set; }
+        public DateTimeOffset? ThruDate { get; set; }
     }
-
-    List<LookupSuggestion> results = sender.Tag switch
-    {
-        "Parent" => await ViewModel.GetParentSuggestionsAsync(text),
-        "Employer" => await ViewModel.GetEmployerSuggestionsAsync(text),
-        "Contract" => await ViewModel.GetContractSuggestionsAsync(text),
-        "Benefit" => await ViewModel.GetBenefitSuggestionsAsync(text),
-        _ => new List<LookupSuggestion>()
-    };
-
-    sender.ItemsSource = results;
 }
 
-private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+
+// ==========================
+// Models/LookupSuggestion.cs
+// ==========================
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models
 {
-    if (args.SelectedItem is not LookupSuggestion item)
-        return;
-
-    sender.Text = item.DisplayText;
-
-    switch (sender.Tag)
+    public class LookupSuggestion
     {
-        case "Parent":
-            ViewModel.SearchCriteria.ParentEmployerGroupUd = item.DisplayText;
-            break;
-        case "Employer":
-            ViewModel.SearchCriteria.EmployerGroupUd = item.DisplayText;
-            break;
-        case "Contract":
-            ViewModel.SearchCriteria.GroupContractUd = item.DisplayText;
-            break;
-        case "Benefit":
-            ViewModel.SearchCriteria.BenefitPlanUd = item.DisplayText;
-            break;
+        public string? Id { get; set; }
+        public string? DisplayText { get; set; }
     }
-
-    ViewModel.RefreshCanSearch();
 }
 
-private void AutoSuggest_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
-{
-    string value = args.ChosenSuggestion is LookupSuggestion item
-        ? item.DisplayText!
-        : sender.Text;
 
-    switch (sender.Tag)
+// ==========================
+// Models/GroupHoldoverRow.cs
+// ==========================
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models
+{
+    public class GroupHoldoverRow
     {
-        case "Parent":
-            ViewModel.SearchCriteria.ParentEmployerGroupUd = value;
-            break;
-        case "Employer":
-            ViewModel.SearchCriteria.EmployerGroupUd = value;
-            break;
-        case "Contract":
-            ViewModel.SearchCriteria.GroupContractUd = value;
-            break;
-        case "Benefit":
-            ViewModel.SearchCriteria.BenefitPlanUd = value;
-            break;
+        public int GroupHoldoverId { get; set; }
+        public string? Source { get; set; }
+        public int? EmployerGroupId { get; set; }
+        public string? EmployerGroupUd { get; set; }
+        public string? GroupContractUd { get; set; }
+        public string? BenefitPlanUd { get; set; }
+        public DateTimeOffset? EffectiveDate { get; set; }
+        public DateTimeOffset? ThruDate { get; set; }
     }
-
-    ViewModel.RefreshCanSearch();
 }
 
-// ===================== VIEWMODEL =====================
 
-public async Task<List<LookupSuggestion>> GetParentSuggestionsAsync(string text)
-{
-    await Task.Delay(200);
-    return FakeData(text);
-}
+// ==========================
+// Helpers/AutoSuggestHelper.cs
+// ==========================
+using Microsoft.UI.Xaml.Controls;
 
-public async Task<List<LookupSuggestion>> GetEmployerSuggestionsAsync(string text)
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Helpers
 {
-    await Task.Delay(200);
-    return FakeData(text);
-}
-
-public async Task<List<LookupSuggestion>> GetContractSuggestionsAsync(string text)
-{
-    await Task.Delay(200);
-    return FakeData(text);
-}
-
-public async Task<List<LookupSuggestion>> GetBenefitSuggestionsAsync(string text)
-{
-    await Task.Delay(200);
-    return FakeData(text);
-}
-
-private List<LookupSuggestion> FakeData(string text)
-{
-    var all = new List<LookupSuggestion>
+    public static class AutoSuggestHelper
     {
-        new() { Id = "1", DisplayText = "ABCD1001" },
-        new() { Id = "2", DisplayText = "ABCD1002" },
-        new() { Id = "3", DisplayText = "XYZ2001" },
-        new() { Id = "4", DisplayText = "TEST3001" }
-    };
+        public static bool ShouldSearch(AutoSuggestBoxTextChangedEventArgs args, string? text, int minLength = 4)
+        {
+            return args.Reason == AutoSuggestionBoxTextChangeReason.UserInput
+                && !string.IsNullOrWhiteSpace(text)
+                && text.Trim().Length >= minLength;
+        }
 
-    return all
-        .Where(x => x.DisplayText!.Contains(text, StringComparison.OrdinalIgnoreCase))
-        .ToList();
+        public static string GetSafeText(string? text)
+        {
+            return text?.Trim() ?? string.Empty;
+        }
+    }
 }
 
-public void RefreshCanSearch()
+
+// ==========================
+// Validation/GroupHoldoverValidator.cs
+// ==========================
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Validation
 {
-    OnPropertyChanged(nameof(CanSearch));
+    public static class GroupHoldoverValidator
+    {
+        public static string? Validate(GroupHoldoverEditModel model)
+        {
+            if (string.IsNullOrWhiteSpace(model.ParentEmployerGroupUd) &&
+                string.IsNullOrWhiteSpace(model.EmployerGroupUd) &&
+                string.IsNullOrWhiteSpace(model.GroupContractUd) &&
+                string.IsNullOrWhiteSpace(model.BenefitPlanUd))
+            {
+                return "Enter at least one search criteria.";
+            }
+
+            if (model.EffectiveDate.HasValue &&
+                model.ThruDate.HasValue &&
+                model.ThruDate < model.EffectiveDate)
+            {
+                return "Thru Date cannot be earlier than Effective Date.";
+            }
+
+            return null;
+        }
+    }
 }
+
+
+// ==========================
+// Dialogs/GroupHoldoverDialog.xaml
+// ==========================
+/*
+<ContentDialog
+    x:Class="WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Dialogs.GroupHoldoverDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Add New Record"
+    PrimaryButtonText="Save"
+    CloseButtonText="Cancel"
+    DefaultButton="Primary"
+    PrimaryButtonClick="ContentDialog_PrimaryButtonClick">
+
+    <StackPanel Spacing="10" Width="500">
+
+        <TextBlock x:Name="ErrorTextBlock" Foreground="Red"/>
+
+        <AutoSuggestBox x:Name="ParentBox" Header="Parent Employer Group UD"
+                        TextChanged="AutoSuggest_TextChanged"
+                        SuggestionChosen="AutoSuggest_SuggestionChosen"
+                        Tag="Parent" DisplayMemberPath="DisplayText">
+            <AutoSuggestBox.QueryIcon>
+                <SymbolIcon Symbol="Find"/>
+            </AutoSuggestBox.QueryIcon>
+        </AutoSuggestBox>
+
+        <AutoSuggestBox x:Name="EmployerBox" Header="Employer Group UD"
+                        TextChanged="AutoSuggest_TextChanged"
+                        SuggestionChosen="AutoSuggest_SuggestionChosen"
+                        Tag="Employer" DisplayMemberPath="DisplayText">
+            <AutoSuggestBox.QueryIcon>
+                <SymbolIcon Symbol="Find"/>
+            </AutoSuggestBox.QueryIcon>
+        </AutoSuggestBox>
+
+        <AutoSuggestBox x:Name="ContractBox" Header="Group Contract UD"
+                        TextChanged="AutoSuggest_TextChanged"
+                        SuggestionChosen="AutoSuggest_SuggestionChosen"
+                        Tag="Contract" DisplayMemberPath="DisplayText">
+            <AutoSuggestBox.QueryIcon>
+                <SymbolIcon Symbol="Find"/>
+            </AutoSuggestBox.QueryIcon>
+        </AutoSuggestBox>
+
+        <AutoSuggestBox x:Name="BenefitBox" Header="Benefit Plan UD"
+                        TextChanged="AutoSuggest_TextChanged"
+                        SuggestionChosen="AutoSuggest_SuggestionChosen"
+                        Tag="Benefit" DisplayMemberPath="DisplayText">
+            <AutoSuggestBox.QueryIcon>
+                <SymbolIcon Symbol="Find"/>
+            </AutoSuggestBox.QueryIcon>
+        </AutoSuggestBox>
+
+        <DatePicker x:Name="EffectiveDatePicker" Header="Effective Date"/>
+        <DatePicker x:Name="ThruDatePicker" Header="Thru Date"/>
+
+    </StackPanel>
+</ContentDialog>
+*/
+
+
+// ==========================
+// Dialogs/GroupHoldoverDialog.xaml.cs
+// ==========================
+using Microsoft.UI.Xaml.Controls;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Helpers;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Validation;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Dialogs
+{
+    public sealed partial class GroupHoldoverDialog : ContentDialog
+    {
+        public GroupHoldoverEditModel Result { get; private set; } = new();
+
+        public GroupHoldoverDialog()
+        {
+            InitializeComponent();
+        }
+
+        private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+        {
+            var text = AutoSuggestHelper.GetSafeText(sender.Text);
+
+            if (!AutoSuggestHelper.ShouldSearch(args, text))
+            {
+                sender.ItemsSource = null;
+                return;
+            }
+
+            var results = await GetSuggestionsAsync(text);
+            sender.ItemsSource = results;
+        }
+
+        private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+        {
+            if (args.SelectedItem is LookupSuggestion item)
+            {
+                sender.Text = item.DisplayText;
+            }
+        }
+
+        private void ContentDialog_PrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
+        {
+            var model = new GroupHoldoverEditModel
+            {
+                ParentEmployerGroupUd = ParentBox.Text,
+                EmployerGroupUd = EmployerBox.Text,
+                GroupContractUd = ContractBox.Text,
+                BenefitPlanUd = BenefitBox.Text,
+                EffectiveDate = EffectiveDatePicker.Date,
+                ThruDate = ThruDatePicker.Date
+            };
+
+            var error = GroupHoldoverValidator.Validate(model);
+            if (!string.IsNullOrEmpty(error))
+            {
+                args.Cancel = true;
+                ErrorTextBlock.Text = error;
+                return;
+            }
+
+            Result = model;
+        }
+
+        private async Task<List<LookupSuggestion>> GetSuggestionsAsync(string text)
+        {
+            await Task.Delay(100);
+
+            return new List<LookupSuggestion>
+            {
+                new() { DisplayText = text + "001" },
+                new() { DisplayText = text + "002" }
+            };
+        }
+    }
+}
+
+
+// ==========================
+// ViewModels/GroupHoldoverViewModel.cs
+// ==========================
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public class GroupHoldoverViewModel : INotifyPropertyChanged
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+
+        public ObservableCollection<GroupHoldoverRow> Results { get; } = new();
+
+        private GroupHoldoverRow? _selected;
+        public GroupHoldoverRow? Selected
+        {
+            get => _selected;
+            set { _selected = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanDelete)); }
+        }
+
+        public bool CanDelete => Selected != null;
+
+        public void Add(GroupHoldoverEditModel model)
+        {
+            Results.Add(new GroupHoldoverRow
+            {
+                GroupHoldoverId = Results.Count + 1,
+                Source = "MCRDC",
+                EmployerGroupUd = model.EmployerGroupUd
+            });
+        }
+
+        public void Delete()
+        {
+            if (Selected != null)
+                Results.Remove(Selected);
+        }
+    }
+}
+
+
+// ==========================
+// Page XAML (buttons)
+// ==========================
+/*
+<StackPanel Orientation="Horizontal" Spacing="10">
+    <Button Content="Add New Record"
+            Click="Add_Click"
+            Style="{StaticResource AccentButtonStyle}"/>
+
+    <Button Content="Delete Selected Record(s)"
+            Click="Delete_Click"
+            IsEnabled="{x:Bind ViewModel.CanDelete, Mode=OneWay}"/>
+</StackPanel>
+*/
+
+
+// ==========================
+// Page Code Behind
+// ==========================
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Dialogs;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public sealed partial class GroupHoldoverSearchPage : Page
+    {
+        public GroupHoldoverViewModel ViewModel { get; } = new();
+
+        public GroupHoldoverSearchPage()
+        {
+            InitializeComponent();
+        }
+
+        private async void Add_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new GroupHoldoverDialog { XamlRoot = this.XamlRoot };
+            var result = await dlg.ShowAsync();
+
+            if (result == ContentDialogResult.Primary)
+                ViewModel.Add(dlg.Result);
+        }
+
+        private void Delete_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.Delete();
+        }
+    }
+}
+
+// =====================================================
+// FILE: Models/GroupHoldoverRow.cs
+// =====================================================
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models
+{
+    public class GroupHoldoverRow
+    {
+        public int GroupHoldoverId { get; set; }
+        public string? Source { get; set; }
+        public int? EmployerGroupId { get; set; }
+        public string? EmployerGroupUd { get; set; }
+        public string? GroupContractUd { get; set; }
+        public string? BenefitPlanUd { get; set; }
+        public DateTimeOffset? EffectiveDate { get; set; }
+        public DateTimeOffset? ThruDate { get; set; }
+    }
+}
+
+
+// =====================================================
+// FILE: Services/IGroupHoldoverDataProvider.cs
+// =====================================================
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Services
+{
+    public interface IGroupHoldoverDataProvider
+    {
+        Task DeleteGroupHoldoverAsync(int groupHoldoverId, CancellationToken cancellationToken = default);
+    }
+}
+
+
+// =====================================================
+// FILE: Services/GroupHoldoverDataProvider.cs
+// Replace URL / request shape with your real API.
+// =====================================================
+
+using System.Net.Http;
+using System.Net.Http.Json;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Services
+{
+    public class GroupHoldoverDataProvider : IGroupHoldoverDataProvider
+    {
+        private readonly HttpClient _httpClient;
+
+        public GroupHoldoverDataProvider(HttpClient httpClient)
+        {
+            _httpClient = httpClient;
+        }
+
+        public async Task DeleteGroupHoldoverAsync(int groupHoldoverId, CancellationToken cancellationToken = default)
+        {
+            // Example 1: REST delete
+            var response = await _httpClient.DeleteAsync($"api/groupholdover/{groupHoldoverId}", cancellationToken);
+
+            // Example 2: if your API expects POST instead, use this instead of DeleteAsync:
+            // var response = await _httpClient.PostAsJsonAsync("api/groupholdover/delete", new { groupHoldoverId }, cancellationToken);
+
+            response.EnsureSuccessStatusCode();
+        }
+    }
+}
+
+
+// =====================================================
+// FILE: ViewModels/GroupHoldoverViewModel.cs
+// =====================================================
+
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Models;
+using WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.Services;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public class GroupHoldoverViewModel : INotifyPropertyChanged
+    {
+        private readonly IGroupHoldoverDataProvider _dataProvider;
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string? name = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+
+        public GroupHoldoverViewModel(IGroupHoldoverDataProvider dataProvider)
+        {
+            _dataProvider = dataProvider;
+        }
+
+        // Grid data
+        public ObservableCollection<GroupHoldoverRow> Results { get; } = new();
+
+        // Selected row
+        private GroupHoldoverRow? _selected;
+        public GroupHoldoverRow? Selected
+        {
+            get => _selected;
+            set
+            {
+                _selected = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(CanDelete));
+            }
+        }
+
+        // Delete button enabled only when a row is selected and not deleting
+        private bool _isDeleting;
+        public bool IsDeleting
+        {
+            get => _isDeleting;
+            set
+            {
+                _isDeleting = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(CanDelete));
+            }
+        }
+
+        public bool CanDelete => Selected != null && !IsDeleting;
+
+        public async Task DeleteSelectedAsync(CancellationToken cancellationToken = default)
+        {
+            if (Selected == null)
+                return;
+
+            var itemToDelete = Selected;
+
+            try
+            {
+                IsDeleting = true;
+
+                // API call first
+                await _dataProvider.DeleteGroupHoldoverAsync(itemToDelete.GroupHoldoverId, cancellationToken);
+
+                // Remove from grid only after successful API delete
+                Results.Remove(itemToDelete);
+
+                // Reset selection
+                Selected = null;
+            }
+            finally
+            {
+                IsDeleting = false;
+            }
+        }
+    }
+}
+
+
+// =====================================================
+// FILE: Pages/GroupHoldoverSearchPage.xaml
+// =====================================================
+
+/*
+<Button Content="Delete Selected Record(s)"
+        Click="Delete_Click"
+        IsEnabled="{x:Bind ViewModel.CanDelete, Mode=OneWay}" />
+
+<controls:DataGrid
+    x:Name="DataGrid"
+    Grid.Row="3"
+    ItemsSource="{x:Bind ViewModel.Results}"
+    SelectedItem="{x:Bind ViewModel.Selected, Mode=TwoWay}"
+    SelectionMode="Single"
+    AutoGenerateColumns="False">
+
+    <controls:DataGrid.Columns>
+        <controls:DataGridTextColumn Header="Group Holdover ID" Binding="{Binding GroupHoldoverId}" />
+        <controls:DataGridTextColumn Header="Source" Binding="{Binding Source}" />
+        <controls:DataGridTextColumn Header="Employer Group UD" Binding="{Binding EmployerGroupUd}" />
+        <controls:DataGridTextColumn Header="Group Contract UD" Binding="{Binding GroupContractUd}" />
+        <controls:DataGridTextColumn Header="Benefit Plan UD" Binding="{Binding BenefitPlanUd}" />
+    </controls:DataGrid.Columns>
+</controls:DataGrid>
+*/
+
+
+// =====================================================
+// FILE: Pages/GroupHoldoverSearchPage.xaml.cs
+// =====================================================
+
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public sealed partial class GroupHoldoverSearchPage : Page
+    {
+        public GroupHoldoverViewModel ViewModel { get; }
+
+        public GroupHoldoverSearchPage(GroupHoldoverViewModel viewModel)
+        {
+            ViewModel = viewModel;
+            this.InitializeComponent();
+        }
+
+        private async void Delete_Click(object sender, RoutedEventArgs e)
+        {
+            if (ViewModel.Selected == null)
+                return;
+
+            var dialog = new ContentDialog
+            {
+                Title = "Confirm Delete",
+                Content = "Are you sure you want to delete this record?",
+                PrimaryButtonText = "Delete",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = this.XamlRoot
+            };
+
+            var result = await dialog.ShowAsync();
+
+            if (result != ContentDialogResult.Primary)
+                return;
+
+            try
+            {
+                await ViewModel.DeleteSelectedAsync();
+            }
+            catch (Exception ex)
+            {
+                var errorDialog = new ContentDialog
+                {
+                    Title = "Delete Failed",
+                    Content = ex.Message,
+                    CloseButtonText = "OK",
+                    XamlRoot = this.XamlRoot
+                };
+
+                await errorDialog.ShowAsync();
+            }
+        }
+    }
+}
+
+
+// =====================================================
+// FILE: App.xaml.cs
+// Register services in ConfigureServices
+// =====================================================
+
+/*
+services.AddHttpClient<IGroupHoldoverDataProvider, GroupHoldoverDataProvider>(client =>
+{
+    client.BaseAddress = new Uri("https://your-api-base-url/");
+});
+
+services.AddTransient<GroupHoldoverViewModel>();
+services.AddTransient<GroupHoldoverSearchPage>();
+*/
