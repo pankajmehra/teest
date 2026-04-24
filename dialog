@@ -1,0 +1,252 @@
+<!-- FILE: GroupHoldoverDialog.xaml -->
+<ContentDialog
+    x:Class="WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover.GroupHoldoverDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Add New Record"
+    PrimaryButtonText=""
+    CloseButtonText=""
+    PrimaryButtonClick="ContentDialog_PrimaryButtonClick">
+
+    <ScrollViewer>
+        <StackPanel Spacing="14" Width="760">
+
+            <TextBlock Text="Fields with an asterisk (*) are required"
+                       FontStyle="Italic"/>
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <TextBlock Text="Source"/>
+                <TextBlock Text="mcrdc"/>
+            </StackPanel>
+
+            <TextBlock Text="Must enter information for at least one (1) of the below fields"
+                       FontStyle="Italic"/>
+
+            <Grid RowSpacing="10" ColumnSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="220"/>
+                    <ColumnDefinition Width="420"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Parent Employer Group UD *" VerticalAlignment="Center"/>
+                <AutoSuggestBox x:Name="ParentEmployerGroupUdBox"
+                                Grid.Row="0" Grid.Column="1"
+                                PlaceholderText="Search"
+                                TextChanged="AutoSuggest_TextChanged"
+                                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                                Tag="Parent"
+                                DisplayMemberPath="DisplayText">
+                    <AutoSuggestBox.QueryIcon>
+                        <SymbolIcon Symbol="Find"/>
+                    </AutoSuggestBox.QueryIcon>
+                </AutoSuggestBox>
+
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="or" HorizontalAlignment="Center" FontStyle="Italic"/>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Employer Group UD *" VerticalAlignment="Center"/>
+                <AutoSuggestBox x:Name="EmployerGroupUdBox"
+                                Grid.Row="2" Grid.Column="1"
+                                PlaceholderText="Search"
+                                TextChanged="AutoSuggest_TextChanged"
+                                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                                Tag="Employer"
+                                DisplayMemberPath="DisplayText">
+                    <AutoSuggestBox.QueryIcon>
+                        <SymbolIcon Symbol="Find"/>
+                    </AutoSuggestBox.QueryIcon>
+                </AutoSuggestBox>
+
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="or" HorizontalAlignment="Center" FontStyle="Italic"/>
+
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Group Contract UD *" VerticalAlignment="Center"/>
+                <AutoSuggestBox x:Name="GroupContractUdBox"
+                                Grid.Row="4" Grid.Column="1"
+                                PlaceholderText="Search"
+                                TextChanged="AutoSuggest_TextChanged"
+                                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                                Tag="Contract"
+                                DisplayMemberPath="DisplayText">
+                    <AutoSuggestBox.QueryIcon>
+                        <SymbolIcon Symbol="Find"/>
+                    </AutoSuggestBox.QueryIcon>
+                </AutoSuggestBox>
+
+                <TextBlock Grid.Row="5" Grid.Column="1" Text="or" HorizontalAlignment="Center" FontStyle="Italic"/>
+
+                <TextBlock Grid.Row="6" Grid.Column="0" Text="Benefit Plan UD *" VerticalAlignment="Center"/>
+                <AutoSuggestBox x:Name="BenefitPlanUdBox"
+                                Grid.Row="6" Grid.Column="1"
+                                PlaceholderText="Search"
+                                TextChanged="AutoSuggest_TextChanged"
+                                SuggestionChosen="AutoSuggest_SuggestionChosen"
+                                Tag="Benefit"
+                                DisplayMemberPath="DisplayText">
+                    <AutoSuggestBox.QueryIcon>
+                        <SymbolIcon Symbol="Find"/>
+                    </AutoSuggestBox.QueryIcon>
+                </AutoSuggestBox>
+
+                <TextBlock Grid.Row="7" Grid.Column="0" Text="Effective Date" VerticalAlignment="Center"/>
+                <DatePicker x:Name="EffectiveDatePicker" Grid.Row="7" Grid.Column="1"/>
+
+                <TextBlock Grid.Row="8" Grid.Column="0" Text="Thru Date" VerticalAlignment="Center"/>
+                <DatePicker x:Name="ThruDatePicker" Grid.Row="8" Grid.Column="1"/>
+            </Grid>
+
+            <StackPanel Orientation="Horizontal" Spacing="80">
+                <CheckBox x:Name="UseReceivedDateCheckBox" Content="Use Received Date"/>
+                <CheckBox x:Name="UseIncurredDateCheckBox" Content="Use Incurred Date"/>
+            </StackPanel>
+
+            <TextBox x:Name="CommentTextBox"
+                     Header="Comment*"
+                     AcceptsReturn="True"
+                     TextWrapping="Wrap"
+                     Height="80"/>
+
+            <TextBlock x:Name="ErrorTextBlock"
+                       Foreground="Red"
+                       TextWrapping="Wrap"/>
+
+            <Grid ColumnSpacing="20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <Button Grid.Column="0"
+                        Content="Save"
+                        HorizontalAlignment="Stretch"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="SaveButton_Click"/>
+
+                <Button Grid.Column="1"
+                        Content="Delete"
+                        HorizontalAlignment="Stretch"
+                        Click="DeleteButton_Click"/>
+            </Grid>
+
+        </StackPanel>
+    </ScrollViewer>
+</ContentDialog>
+
+// FILE: GroupHoldoverDialog.xaml.cs
+
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using WebTPA.GeneralManagement.Core.Features.BenefitAdministration.HoldoverTable;
+
+namespace WebTPA.GeneralManagement.DesktopUI.Features.BenefitAdministrator.GroupHoldover
+{
+    public sealed partial class GroupHoldoverDialog : ContentDialog
+    {
+        public GroupHoldOverModel Result { get; private set; } = new();
+
+        public bool IsDeleteRequested { get; private set; }
+
+        public GroupHoldoverDialog()
+        {
+            InitializeComponent();
+        }
+
+        private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+        {
+            if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+                return;
+
+            var text = sender.Text?.Trim() ?? string.Empty;
+
+            if (text.Length < 4)
+            {
+                sender.ItemsSource = null;
+                return;
+            }
+
+            sender.ItemsSource = await GetSuggestionsAsync(sender.Tag?.ToString(), text);
+        }
+
+        private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+        {
+            if (args.SelectedItem is LookupSuggestion item)
+                sender.Text = item.DisplayText;
+        }
+
+        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!HasAtLeastOneUd())
+            {
+                ErrorTextBlock.Text = "Enter at least one of Parent Employer Group UD, Employer Group UD, Group Contract UD, or Benefit Plan UD.";
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(CommentTextBox.Text))
+            {
+                ErrorTextBlock.Text = "Comment is required.";
+                return;
+            }
+
+            Result = new GroupHoldOverModel
+            {
+                ParentEmployerGroupUd = ParentEmployerGroupUdBox.Text?.Trim(),
+                EmployerGroupUd = EmployerGroupUdBox.Text?.Trim(),
+                GroupContractUd = GroupContractUdBox.Text?.Trim(),
+                BenefitPlanUd = BenefitPlanUdBox.Text?.Trim(),
+                EffectiveDate = EffectiveDatePicker.Date,
+                ThruDate = ThruDatePicker.Date,
+                UseReceiveDate = UseReceivedDateCheckBox.IsChecked,
+                UseIncurredDate = UseIncurredDateCheckBox.IsChecked
+            };
+
+            Hide();
+        }
+
+        private void DeleteButton_Click(object sender, RoutedEventArgs e)
+        {
+            IsDeleteRequested = true;
+            Hide();
+        }
+
+        private void ContentDialog_PrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
+        {
+            // intentionally unused because custom Save button is used
+        }
+
+        private bool HasAtLeastOneUd()
+        {
+            return !string.IsNullOrWhiteSpace(ParentEmployerGroupUdBox.Text)
+                || !string.IsNullOrWhiteSpace(EmployerGroupUdBox.Text)
+                || !string.IsNullOrWhiteSpace(GroupContractUdBox.Text)
+                || !string.IsNullOrWhiteSpace(BenefitPlanUdBox.Text);
+        }
+
+        private async Task<List<LookupSuggestion>> GetSuggestionsAsync(string? type, string text)
+        {
+            await Task.Delay(150);
+
+            return new List<LookupSuggestion>
+            {
+                new() { Id = "1", DisplayText = text + "001" },
+                new() { Id = "2", DisplayText = text + "002" },
+                new() { Id = "3", DisplayText = text + "003" }
+            };
+        }
+    }
+
+    public class LookupSuggestion
+    {
+        public string? Id { get; set; }
+        public string? DisplayText { get; set; }
+    }
+}
