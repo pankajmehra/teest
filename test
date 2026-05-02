@@ -1,39 +1,37 @@
-public async Task<List<GroupHoldoverTableSearchResult>> GetGroupHoldoverTableSearchResults(
-    GroupHoldoverTableSearchCriteria criteria)
+using System.Text.Json.Serialization;
+
+public class GroupHoldoverTableSearchResult
 {
-    var query = new Dictionary<string, string>();
+    [JsonPropertyName("group_holdover_table_id")]
+    public int GroupHoldoverId { get; set; }
 
-    if (criteria.ParentEmployerGroupId.HasValue)
-        query["ParentEmployerGroupId"] = criteria.ParentEmployerGroupId.Value.ToString();
+    [JsonPropertyName("source")]
+    public string? Source { get; set; }
 
-    if (criteria.GroupHoldoverTableId.HasValue)
-        query["GroupHoldoverTableId"] = criteria.GroupHoldoverTableId.Value.ToString();
+    [JsonPropertyName("employergroup_id")]
+    public int EmployerGroupId { get; set; }
 
-    if (criteria.EmployerGroupID.HasValue)
-        query["EmployerGroupID"] = criteria.EmployerGroupID.Value.ToString();
+    [JsonPropertyName("employergroup_ud")]
+    public string? EmployerGroupUd { get; set; }
 
-    if (criteria.GroupContractID.HasValue)
-        query["GroupContractID"] = criteria.GroupContractID.Value.ToString();
+    [JsonPropertyName("groupcontract_ud")]
+    public string? GroupContractUd { get; set; }
 
-    if (criteria.BenefitPlanID.HasValue)
-        query["BenefitPlanID"] = criteria.BenefitPlanID.Value.ToString();
+    [JsonPropertyName("benefitplan_ud")]
+    public string? BenefitPlanUd { get; set; }
 
-    if (!string.IsNullOrWhiteSpace(criteria.EffectiveDate))
-        query["EffectiveDate"] = criteria.EffectiveDate;
+    [JsonPropertyName("effective_date")]
+    public string? EffectiveDate { get; set; }
 
-    if (!string.IsNullOrWhiteSpace(criteria.ThruDate))
-        query["ThruDate"] = criteria.ThruDate;
+    [JsonPropertyName("thru_date")]
+    public string? ThruDate { get; set; }
 
-    if (!string.IsNullOrWhiteSpace(criteria.Comment))
-        query["Comment"] = criteria.Comment;
+    [JsonPropertyName("use_received_date")]
+    public bool? UseReceiveDate { get; set; }
 
-    var queryString = string.Join("&", query.Select(x =>
-        $"{Uri.EscapeDataString(x.Key)}={Uri.EscapeDataString(x.Value)}"));
+    [JsonPropertyName("use_incurred_date")]
+    public bool? UseIncurDate { get; set; }
 
-    var url = "/api/benefit-administration/GroupHoldoverTool/Group-holdover";
-
-    if (!string.IsNullOrWhiteSpace(queryString))
-        url += "?" + queryString;
-
-    return await _apiClient.GetAsync2<List<GroupHoldoverTableSearchResult>>(new Uri(url, UriKind.Relative));
+    [JsonPropertyName("comment")]
+    public string? Comment { get; set; }
 }
