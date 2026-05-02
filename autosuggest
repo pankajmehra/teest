@@ -1,276 +1,189 @@
-        private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+// =======================
+// INTERFACE (COMMON MODEL)
+// =======================
+public interface IGroupHoldoverLookupModel
+{
+    int? ParentEmployerGroupId { get; set; }
+    string? ParentEmployerGroupUd { get; set; }
+
+    int? EmployerGroupId { get; set; }
+    string? EmployerGroupUd { get; set; }
+
+    int? GroupContractId { get; set; }
+    string? GroupContractUd { get; set; }
+
+    int? BenefitPlanId { get; set; }
+    string? BenefitPlanUd { get; set; }
+}
+
+// =======================
+// HELPER (REUSABLE LOGIC)
+// =======================
+public static class AutoSuggestHelper
+{
+    public static void ClearIfTextChanged(
+        string? type,
+        string text,
+        IGroupHoldoverLookupModel model,
+        ref LookupSuggestion? selected)
+    {
+        if (selected?.DisplayText == text)
+            return;
+
+        selected = null;
+
+        switch (type)
         {
-            var text = sender.Text?.Trim() ?? string.Empty;
+            case "ParentGroupUD":
+                model.ParentEmployerGroupId = null;
+                model.ParentEmployerGroupUd = text;
+                break;
 
-            switch (sender.Tag)
-            {
-                case "ParentGroupUD":
-                    if (ViewModel.SelectedParentEmployerGroupUD?.DisplayText != text)
-                    {
-                        ViewModel.SearchCriteria.ParentEmployerGroupID = null;
-                        ViewModel.SelectedParentEmployerGroupUD = null;
-                    }
+            case "EmployerGroupUD":
+                model.EmployerGroupId = null;
+                model.EmployerGroupUd = text;
+                break;
 
-                    ViewModel.SearchCriteria.ParentEmployerGroupUd = text;
+            case "Contract":
+                model.GroupContractId = null;
+                model.GroupContractUd = text;
+                break;
 
-                    break;
-                case "EmployerGroupUD":
-                    if (ViewModel.SelectedEmployerGroupUD?.DisplayText != text)
-                    {
-                        ViewModel.SelectedEmployerGroupUD = null;
-                        ViewModel.SearchCriteria.EmployerGroupID = null;
-                    }
-
-                    ViewModel.SearchCriteria.EmployerGroupUd = text;
-
-                    break;
-                case "Contract":
-                    if (ViewModel.SelectedGroupContractUD?.DisplayText != text)
-                    {
-                        ViewModel.SelectedGroupContractUD = null;
-                        ViewModel.SearchCriteria.GroupContractID = null;
-                    }
-                    ViewModel.SearchCriteria.GroupContractUd = text;
-
-                    break;
-                case "Benefit":
-                    if (ViewModel.SelectedBenefitPlanUd?.DisplayText != text)
-                    {
-                        ViewModel.SelectedBenefitPlanUd = null;
-                        ViewModel.SearchCriteria.BenefitPlanID = null;
-                    }
-                    ViewModel.SearchCriteria.BenefitPlanUd = text;
-
-                    break;
-            }
-
-            var selectedText = sender.Tag switch
-            {
-                "ParentGroupUD" => ViewModel.SelectedParentEmployerGroupUD?.DisplayText,
-                "EmployerGroupUD" => ViewModel.SelectedEmployerGroupUD?.DisplayText,
-                "Contract" => ViewModel.SelectedGroupContractUD?.DisplayText,
-                "Benefit" => ViewModel.SelectedBenefitPlanUd?.DisplayText,
-                _ => null
-            };
-            if (!string.IsNullOrEmpty(selectedText) && string.Equals(selectedText, text, StringComparison.Ordinal))
-            {
-                return;
-            }
-            ViewModel.RefreshCanSearch();
-            if (text.Length < 4)
-            {
-                sender.ItemsSource = null;
-                return;
-            }
-            sender.ItemsSource = await ViewModel.GetLookupSuggestionsAsync(sender.Tag.ToString(), text);
-
+            case "Benefit":
+                model.BenefitPlanId = null;
+                model.BenefitPlanUd = text;
+                break;
         }
+    }
 
-        private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+    public static void ApplySelection(
+        string? type,
+        LookupSuggestion selected,
+        IGroupHoldoverLookupModel model,
+        Action<LookupSuggestion?> setSelected)
+    {
+        setSelected(selected);
+
+        switch (type)
         {
-            if (args.SelectedItem is not LookupSuggestion item)
-                return;
+            case "ParentGroupUD":
+                model.ParentEmployerGroupId = selected.Id;
+                model.ParentEmployerGroupUd = selected.DisplayText;
+                break;
 
-            var choosenSuggestion = (LookupSuggestion)args.SelectedItem;
+            case "EmployerGroupUD":
+                model.EmployerGroupId = selected.Id;
+                model.EmployerGroupUd = selected.DisplayText;
+                break;
 
-            sender.Text = item.DisplayText;
+            case "Contract":
+                model.GroupContractId = selected.Id;
+                model.GroupContractUd = selected.DisplayText;
+                break;
 
-            switch (sender.Tag)
-            {
-                case "ParentGroupUD":
-                    ViewModel.SelectedParentEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "EmployerGroupUD":
-                    ViewModel.SelectedEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "Contract":
-                    ViewModel.SelectedGroupContractUD = choosenSuggestion;
-                    break;
-                case "Benefit":
-                    ViewModel.SelectedBenefitPlanUd = choosenSuggestion;
-                    break;
-            }
-
-            ViewModel.RefreshCanSearch();
+            case "Benefit":
+                model.BenefitPlanId = selected.Id;
+                model.BenefitPlanUd = selected.DisplayText;
+                break;
         }
+    }
+}
 
-        private void AutoSuggest_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
-        {
-            string value = args.ChosenSuggestion is LookupSuggestion item
-                ? item.DisplayText!
-                : sender.Text;
+// =======================
+// PAGE / DIALOG CODE
+// =======================
 
+// map selected items
+private LookupSuggestion? GetSelected(string? type)
+{
+    return type switch
+    {
+        "ParentGroupUD" => ViewModel.SelectedParentEmployerGroupUD,
+        "EmployerGroupUD" => ViewModel.SelectedEmployerGroupUD,
+        "Contract" => ViewModel.SelectedGroupContractUD,
+        "Benefit" => ViewModel.SelectedBenefitPlanUd,
+        _ => null
+    };
+}
 
-            var choosenSuggestion = (LookupSuggestion)args.ChosenSuggestion;
+private void SetSelected(string? type, LookupSuggestion? value)
+{
+    switch (type)
+    {
+        case "ParentGroupUD":
+            ViewModel.SelectedParentEmployerGroupUD = value;
+            break;
+        case "EmployerGroupUD":
+            ViewModel.SelectedEmployerGroupUD = value;
+            break;
+        case "Contract":
+            ViewModel.SelectedGroupContractUD = value;
+            break;
+        case "Benefit":
+            ViewModel.SelectedBenefitPlanUd = value;
+            break;
+    }
+}
 
-            if (choosenSuggestion != null)
-            {
+// =======================
+// TEXT CHANGED
+// =======================
+private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+{
+    if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+        return;
 
-                var selectedId = choosenSuggestion.Id;
+    var type = sender.Tag?.ToString();
+    var text = sender.Text?.Trim() ?? "";
 
-                switch (sender.Tag)
-                {
-                    case "ParentGroupUD":
-                        ViewModel.SearchCriteria.ParentEmployerGroupUd = value;
-                        ViewModel.SearchCriteria.ParentEmployerGroupID = selectedId;
-                        ViewModel.SelectedParentEmployerGroupUD = choosenSuggestion;
-                        break;
-                    case "EmployerGroupUD":
-                        ViewModel.SearchCriteria.EmployerGroupUd = value;
-                        ViewModel.SearchCriteria.EmployerGroupID = selectedId;
-                        ViewModel.SelectedEmployerGroupUD = choosenSuggestion;
-                        break;
-                    case "Contract":
-                        ViewModel.SearchCriteria.GroupContractUd = value;
-                        ViewModel.SearchCriteria.GroupContractID = selectedId;
-                        ViewModel.SelectedGroupContractUD = choosenSuggestion;
-                        break;
-                    case "Benefit":
-                        ViewModel.SearchCriteria.BenefitPlanUd = value;
-                        ViewModel.SearchCriteria.BenefitPlanID = selectedId;
-                        ViewModel.SelectedBenefitPlanUd = choosenSuggestion;
-                        break;
-                }
-                isSuggestionSelected = true;
-                ViewModel.RefreshCanSearch();
-            }
-        }
+    var selected = GetSelected(type);
 
+    // 🔴 CHANGE THIS LINE ONLY depending on screen
+    IGroupHoldoverLookupModel model = ViewModel.SearchCriteria; 
+    // OR → ViewModel.GroupHoldoverRow
 
+    AutoSuggestHelper.ClearIfTextChanged(type, text, model, ref selected);
+    SetSelected(type, selected);
 
-        private async void AutoSuggest_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
-        {
-            var text = sender.Text?.Trim() ?? string.Empty;
+    if (text.Length < 4)
+    {
+        sender.ItemsSource = null;
+        return;
+    }
 
-            switch (sender.Tag)
-            {
-                case "ParentGroupUD":
-                    if (ViewModel.SelectedParentEmployerGroupUD?.DisplayText != text)
-                    {
-                        ViewModel.GroupHoldoverRow.ParentEmployerGroupId = null;
-                        ViewModel.SelectedParentEmployerGroupUD = null;
-                    }
+    sender.ItemsSource = await ViewModel.GetLookupSuggestionsAsync(type, text);
+}
 
-                    ViewModel.GroupHoldoverRow.ParentEmployerGroupUd = text;
+// =======================
+// SUGGESTION CHOSEN
+// =======================
+private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+{
+    if (args.SelectedItem is not LookupSuggestion selected)
+        return;
 
+    var type = sender.Tag?.ToString();
+    sender.Text = selected.DisplayText;
 
+    IGroupHoldoverLookupModel model = ViewModel.SearchCriteria; 
+    // OR → ViewModel.GroupHoldoverRow
 
-                    break;
-                case "EmployerGroupUD":
-                    if (ViewModel.SelectedEmployerGroupUD?.DisplayText != text)
-                    {
-                        ViewModel.SelectedEmployerGroupUD = null;
-                        ViewModel.GroupHoldoverRow.EmployerGroupId = null;
-                    }
+    AutoSuggestHelper.ApplySelection(type, selected, model, v => SetSelected(type, v));
+}
 
-                    ViewModel.GroupHoldoverRow.EmployerGroupUd = text;
+// =======================
+// QUERY SUBMITTED
+// =======================
+private void AutoSuggest_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+{
+    if (args.ChosenSuggestion is not LookupSuggestion selected)
+        return;
 
-                    break;
-                case "Contract":
-                    if (ViewModel.SelectedGroupContractUD?.DisplayText != text)
-                    {
-                        ViewModel.SelectedGroupContractUD = null;
-                        ViewModel.GroupHoldoverRow.GroupContractId = null;
-                    }
-                    ViewModel.GroupHoldoverRow.GroupContractUd = text;
+    var type = sender.Tag?.ToString();
+    sender.Text = selected.DisplayText;
 
-                    break;
-                case "Benefit":
-                    if (ViewModel.SelectedBenefitPlanUd?.DisplayText != text)
-                    {
-                        ViewModel.SelectedBenefitPlanUd = null;
-                        ViewModel.GroupHoldoverRow.BenefitPlanId = null;
-                    }
-                    ViewModel.GroupHoldoverRow.BenefitPlanUd = text;
+    IGroupHoldoverLookupModel model = ViewModel.SearchCriteria; 
+    // OR → ViewModel.GroupHoldoverRow
 
-                    break;
-            }
-
-            var selectedText = sender.Tag switch
-            {
-                "ParentGroupUD" => ViewModel.SelectedParentEmployerGroupUD?.DisplayText,
-                "EmployerGroupUD" => ViewModel.SelectedEmployerGroupUD?.DisplayText,
-                "Contract" => ViewModel.SelectedGroupContractUD?.DisplayText,
-                "Benefit" => ViewModel.SelectedBenefitPlanUd?.DisplayText,
-                _ => null
-            };
-            if (!string.IsNullOrEmpty(selectedText) && string.Equals(selectedText, text, StringComparison.Ordinal))
-            {
-                return;
-            }
-          //  ViewModel.RefreshCanSearch();
-            if (text.Length < 4)
-            {
-                sender.ItemsSource = null;
-                return;
-            }
-            sender.ItemsSource = await ViewModel.GetLookupSuggestionsAsync(sender.Tag.ToString(), text);
-
-
-        }
-
-        private void AutoSuggest_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
-        {
-            if (args.SelectedItem is not LookupSuggestion item)
-                return;
-
-            var choosenSuggestion = (LookupSuggestion)args.SelectedItem;
-
-            sender.Text = item.DisplayText;
-
-            switch (sender.Tag)
-            {
-                case "ParentGroupUD":
-                    ViewModel.SelectedParentEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "EmployerGroupUD":
-                    ViewModel.SelectedEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "Contract":
-                    ViewModel.SelectedGroupContractUD = choosenSuggestion;
-                    break;
-                case "Benefit":
-                    ViewModel.SelectedBenefitPlanUd = choosenSuggestion;
-                    break;
-            }
-
-        }
-
-        private void AutoSuggest_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
-        {
-            string value = args.ChosenSuggestion is LookupSuggestion item
-                ? item.DisplayText!
-                : sender.Text;
-
-
-
-            var choosenSuggestion = (LookupSuggestion)args.ChosenSuggestion;
-
-            var selectedId = choosenSuggestion.Id;
-
-            switch (sender.Tag)
-            {
-                case "ParentGroupUD":
-                    ViewModel.GroupHoldoverRow.ParentEmployerGroupUd = value;
-                    ViewModel.GroupHoldoverRow.ParentEmployerGroupId = selectedId;
-                    ViewModel.SelectedParentEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "EmployerGroupUD":
-                    ViewModel.GroupHoldoverRow.EmployerGroupUd = value;
-                    ViewModel.GroupHoldoverRow.EmployerGroupId = selectedId;
-                    ViewModel.SelectedEmployerGroupUD = choosenSuggestion;
-                    break;
-                case "Contract":
-                    ViewModel.GroupHoldoverRow.GroupContractUd = value;
-                    ViewModel.GroupHoldoverRow.GroupContractId = selectedId;
-                    ViewModel.SelectedGroupContractUD = choosenSuggestion;
-                    break;
-                case "Benefit":
-                    ViewModel.GroupHoldoverRow.BenefitPlanUd = value;
-                    ViewModel.GroupHoldoverRow.BenefitPlanId = selectedId;
-                    ViewModel.SelectedBenefitPlanUd = choosenSuggestion;
-                    break;
-            }
-            //isSuggestionSelected = true;
-            //ViewModel.RefreshCanSearch();
-        }
+    AutoSuggestHelper.ApplySelection(type, selected, model, v => SetSelected(type, v));
+}
