@@ -1,37 +1,196 @@
-using System.Text.Json.Serialization;
-
-public class GroupHoldoverTableSearchResult
+// ==========================
+// 1. COMMON INTERFACE
+// ==========================
+public interface IGroupHoldoverLookupModel
 {
-    [JsonPropertyName("group_holdover_table_id")]
-    public int GroupHoldoverId { get; set; }
+    int? ParentEmployerGroupId { get; set; }
+    string? ParentEmployerGroupUd { get; set; }
 
-    [JsonPropertyName("source")]
-    public string? Source { get; set; }
+    int? EmployerGroupId { get; set; }
+    string? EmployerGroupUd { get; set; }
 
-    [JsonPropertyName("employergroup_id")]
-    public int EmployerGroupId { get; set; }
+    int? GroupContractId { get; set; }
+    string? GroupContractUd { get; set; }
 
-    [JsonPropertyName("employergroup_ud")]
+    int? BenefitPlanId { get; set; }
+    string? BenefitPlanUd { get; set; }
+}
+
+
+// ==========================
+// 2. SEARCH MODEL
+// ==========================
+public class GroupHoldoverTableSearchCriteria : IGroupHoldoverLookupModel
+{
+    public int? ParentEmployerGroupId { get; set; }
+    public string? ParentEmployerGroupUd { get; set; }
+
+    public int? EmployerGroupId { get; set; }
     public string? EmployerGroupUd { get; set; }
 
-    [JsonPropertyName("groupcontract_ud")]
+    public int? GroupContractId { get; set; }
     public string? GroupContractUd { get; set; }
 
-    [JsonPropertyName("benefitplan_ud")]
+    public int? BenefitPlanId { get; set; }
     public string? BenefitPlanUd { get; set; }
 
-    [JsonPropertyName("effective_date")]
+    // other search-specific properties
     public string? EffectiveDate { get; set; }
-
-    [JsonPropertyName("thru_date")]
     public string? ThruDate { get; set; }
-
-    [JsonPropertyName("use_received_date")]
-    public bool? UseReceiveDate { get; set; }
-
-    [JsonPropertyName("use_incurred_date")]
-    public bool? UseIncurDate { get; set; }
-
-    [JsonPropertyName("comment")]
     public string? Comment { get; set; }
+}
+
+
+// ==========================
+// 3. ADD DIALOG MODEL
+// ==========================
+public class GroupHoldOverModel : IGroupHoldoverLookupModel
+{
+    public int? ParentEmployerGroupId { get; set; }
+    public string? ParentEmployerGroupUd { get; set; }
+
+    public int? EmployerGroupId { get; set; }
+    public string? EmployerGroupUd { get; set; }
+
+    public int? GroupContractId { get; set; }
+    public string? GroupContractUd { get; set; }
+
+    public int? BenefitPlanId { get; set; }
+    public string? BenefitPlanUd { get; set; }
+
+    public string? EffectiveDate { get; set; }
+    public string? ThruDate { get; set; }
+    public bool? UseReceiveDate { get; set; }
+    public bool? UseIncurredDate { get; set; }
+    public string? Comment { get; set; }
+}
+
+
+// ==========================
+// 4. REUSABLE HELPER
+// ==========================
+public static class AutoSuggestSelectionHelper
+{
+    public static void ApplySelection(
+        string? type,
+        LookupSuggestion selected,
+        IGroupHoldoverLookupModel model)
+    {
+        switch (type)
+        {
+            case "ParentGroupUD":
+                model.ParentEmployerGroupId = selected.Id;
+                model.ParentEmployerGroupUd = selected.DisplayText;
+                break;
+
+            case "EmployerGroupUD":
+                model.EmployerGroupId = selected.Id;
+                model.EmployerGroupUd = selected.DisplayText;
+                break;
+
+            case "Contract":
+                model.GroupContractId = selected.Id;
+                model.GroupContractUd = selected.DisplayText;
+                break;
+
+            case "Benefit":
+                model.BenefitPlanId = selected.Id;
+                model.BenefitPlanUd = selected.DisplayText;
+                break;
+        }
+    }
+
+    public static void ClearSelectionId(
+        string? type,
+        IGroupHoldoverLookupModel model)
+    {
+        switch (type)
+        {
+            case "ParentGroupUD":
+                model.ParentEmployerGroupId = null;
+                break;
+
+            case "EmployerGroupUD":
+                model.EmployerGroupId = null;
+                break;
+
+            case "Contract":
+                model.GroupContractId = null;
+                break;
+
+            case "Benefit":
+                model.BenefitPlanId = null;
+                break;
+        }
+    }
+}
+
+
+// ==========================
+// 5. LOOKUP SUGGESTION MODEL
+// ==========================
+public class LookupSuggestion
+{
+    public int Id { get; set; }
+    public string? DisplayText { get; set; }
+}
+
+
+// ==========================
+// 6. USAGE - BOTH SCREENS
+// ==========================
+
+// SuggestionChosen
+private void AutoSuggest_SuggestionChosen(
+    AutoSuggestBox sender,
+    AutoSuggestBoxSuggestionChosenEventArgs args)
+{
+    if (args.SelectedItem is not LookupSuggestion selected)
+        return;
+
+    sender.Text = selected.DisplayText;
+
+    // SEARCH PAGE:
+    AutoSuggestSelectionHelper.ApplySelection(
+        sender.Tag?.ToString(),
+        selected,
+        ViewModel.SearchCriteria);
+
+    // DIALOG:
+    // AutoSuggestSelectionHelper.ApplySelection(
+    //     sender.Tag?.ToString(),
+    //     selected,
+    //     ViewModel.GroupHoldoverRow);
+}
+
+
+// TextChanged
+private async void AutoSuggest_TextChanged(
+    AutoSuggestBox sender,
+    AutoSuggestBoxTextChangedEventArgs args)
+{
+    if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+        return;
+
+    // SEARCH PAGE:
+    AutoSuggestSelectionHelper.ClearSelectionId(
+        sender.Tag?.ToString(),
+        ViewModel.SearchCriteria);
+
+    // DIALOG:
+    // AutoSuggestSelectionHelper.ClearSelectionId(
+    //     sender.Tag?.ToString(),
+    //     ViewModel.GroupHoldoverRow);
+
+    var text = sender.Text?.Trim() ?? string.Empty;
+
+    if (text.Length < 4)
+    {
+        sender.ItemsSource = null;
+        return;
+    }
+
+    sender.ItemsSource = await ViewModel.GetLookupSuggestionsAsync(
+        sender.Tag?.ToString(),
+        text);
 }
