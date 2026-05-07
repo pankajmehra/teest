@@ -1,196 +1,167 @@
-// ==========================
-// 1. COMMON INTERFACE
-// ==========================
-public interface IGroupHoldoverLookupModel
+// ===============================
+// 1) ADD DoubleTapped TO YOUR DATAGRID XAML
+// ===============================
+
+/*
+<controls:DataGrid x:Name="DataGrid"
+                   ...
+                   DoubleTapped="DataGrid_DoubleTapped">
+</controls:DataGrid>
+*/
+
+
+// ===============================
+// 2) ADD THIS CONSTRUCTOR TO GroupHoldoverDialogViewModel
+// Keep your existing constructor if you want.
+// This one is for edit mode.
+// ===============================
+
+public GroupHoldoverDialogViewModel(
+    IGroupHoldoverAutoSuggestService autoSuggestService,
+    GroupHoldOverModel existingRecord)
 {
-    int? ParentEmployerGroupId { get; set; }
-    string? ParentEmployerGroupUd { get; set; }
+    _autoSuggestService = autoSuggestService;
 
-    int? EmployerGroupId { get; set; }
-    string? EmployerGroupUd { get; set; }
+    GroupHoldoverRow = existingRecord;
 
-    int? GroupContractId { get; set; }
-    string? GroupContractUd { get; set; }
-
-    int? BenefitPlanId { get; set; }
-    string? BenefitPlanUd { get; set; }
+    IsEditMode = true;
 }
 
 
-// ==========================
-// 2. SEARCH MODEL
-// ==========================
-public class GroupHoldoverTableSearchCriteria : IGroupHoldoverLookupModel
+// ===============================
+// 3) ADD THESE PROPERTIES TO GroupHoldoverDialogViewModel
+// Optional, only if you want title/button text to change.
+// ===============================
+
+public bool IsEditMode { get; private set; }
+
+public string DialogTitle => IsEditMode ? "Modify Record" : "Add New Record";
+
+public string SaveButtonText => IsEditMode ? "Update" : "Save";
+
+
+// ===============================
+// 4) OPTIONAL XAML CHANGE IN DIALOG
+// Only if you want dialog title/button text to change.
+// ===============================
+
+/*
+<TextBlock Text="{x:Bind ViewModel.DialogTitle, Mode=OneWay}" />
+
+<Button Content="{x:Bind ViewModel.SaveButtonText, Mode=OneWay}"
+        Click="SaveButton_Click" />
+*/
+
+
+// ===============================
+// 5) ADD DOUBLE-CLICK METHOD IN SEARCH PAGE XAML.CS
+// ===============================
+
+private async void DataGrid_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
 {
-    public int? ParentEmployerGroupId { get; set; }
-    public string? ParentEmployerGroupUd { get; set; }
+    if (DataGrid.SelectedItem is not GroupHoldoverTableSearchResult selectedRow)
+        return;
 
-    public int? EmployerGroupId { get; set; }
-    public string? EmployerGroupUd { get; set; }
-
-    public int? GroupContractId { get; set; }
-    public string? GroupContractUd { get; set; }
-
-    public int? BenefitPlanId { get; set; }
-    public string? BenefitPlanUd { get; set; }
-
-    // other search-specific properties
-    public string? EffectiveDate { get; set; }
-    public string? ThruDate { get; set; }
-    public string? Comment { get; set; }
-}
-
-
-// ==========================
-// 3. ADD DIALOG MODEL
-// ==========================
-public class GroupHoldOverModel : IGroupHoldoverLookupModel
-{
-    public int? ParentEmployerGroupId { get; set; }
-    public string? ParentEmployerGroupUd { get; set; }
-
-    public int? EmployerGroupId { get; set; }
-    public string? EmployerGroupUd { get; set; }
-
-    public int? GroupContractId { get; set; }
-    public string? GroupContractUd { get; set; }
-
-    public int? BenefitPlanId { get; set; }
-    public string? BenefitPlanUd { get; set; }
-
-    public string? EffectiveDate { get; set; }
-    public string? ThruDate { get; set; }
-    public bool? UseReceiveDate { get; set; }
-    public bool? UseIncurredDate { get; set; }
-    public string? Comment { get; set; }
-}
-
-
-// ==========================
-// 4. REUSABLE HELPER
-// ==========================
-public static class AutoSuggestSelectionHelper
-{
-    public static void ApplySelection(
-        string? type,
-        LookupSuggestion selected,
-        IGroupHoldoverLookupModel model)
+    var editModel = new GroupHoldOverModel
     {
-        switch (type)
+        // important: this makes API update instead of insert
+        GroupHoldoverTableId = selectedRow.GroupHoldoverId,
+
+        Source = selectedRow.Source,
+
+        ParentEmployerGroupId = selectedRow.ParentEmployerGroupId,
+        ParentEmployerGroupUd = selectedRow.ParentEmployerGroupUd,
+
+        EmployerGroupId = selectedRow.EmployerGroupId,
+        EmployerGroupUd = selectedRow.EmployerGroupUd,
+
+        GroupContractId = selectedRow.GroupContractId,
+        GroupContractUd = selectedRow.GroupContractUd,
+
+        BenefitPlanId = selectedRow.BenefitPlanId,
+        BenefitPlanUd = selectedRow.BenefitPlanUd,
+
+        EffectiveDate = selectedRow.EffectiveDate,
+        ThruDate = selectedRow.ThruDate,
+
+        UseReceiveDate = selectedRow.UseReceiveDate,
+        UseIncurredDate = selectedRow.UseIncurDate,
+
+        Comment = selectedRow.Comment
+    };
+
+    var dialogVm = new GroupHoldoverDialogViewModel(
+        _autoSuggestService,
+        editModel);
+
+    var dialog = new GroupHoldoverDialog(dialogVm)
+    {
+        XamlRoot = this.XamlRoot
+    };
+
+    await dialog.ShowAsync();
+
+    if (!dialog.IsCancelRequested && dialog.ViewModel.GroupHoldoverRow != null)
+    {
+        await ViewModel.UpdateAsync(
+            dialog.ViewModel.GroupHoldoverRow,
+            selectedRow);
+    }
+}
+
+
+// ===============================
+// 6) ADD UpdateAsync TO SEARCH VIEWMODEL
+// ===============================
+
+public async Task UpdateAsync(
+    GroupHoldOverModel model,
+    GroupHoldoverTableSearchResult existingRow)
+{
+    try
+    {
+        IsBusy = true;
+
+        // same API as add, but GroupHoldoverTableId > 0 means update
+        var response = await _provider.AddGroupHoldoverAsync(model);
+
+        if (response.IsSuccess)
         {
-            case "ParentGroupUD":
-                model.ParentEmployerGroupId = selected.Id;
-                model.ParentEmployerGroupUd = selected.DisplayText;
-                break;
+            existingRow.Source = response.Value.Source;
 
-            case "EmployerGroupUD":
-                model.EmployerGroupId = selected.Id;
-                model.EmployerGroupUd = selected.DisplayText;
-                break;
+            existingRow.ParentEmployerGroupId = response.Value.ParentEmployerGroupId;
+            existingRow.ParentEmployerGroupUd = response.Value.ParentEmployerGroupUd;
 
-            case "Contract":
-                model.GroupContractId = selected.Id;
-                model.GroupContractUd = selected.DisplayText;
-                break;
+            existingRow.EmployerGroupId = response.Value.EmployerGroupId;
+            existingRow.EmployerGroupUd = response.Value.EmployerGroupUd;
 
-            case "Benefit":
-                model.BenefitPlanId = selected.Id;
-                model.BenefitPlanUd = selected.DisplayText;
-                break;
+            existingRow.GroupContractId = response.Value.GroupContractId;
+            existingRow.GroupContractUd = response.Value.GroupContractUd;
+
+            existingRow.BenefitPlanId = response.Value.BenefitPlanId;
+            existingRow.BenefitPlanUd = response.Value.BenefitPlanUd;
+
+            existingRow.EffectiveDate = response.Value.EffectiveDate;
+            existingRow.ThruDate = response.Value.ThruDate;
+
+            existingRow.UseReceiveDate = response.Value.UseReceiveDate;
+            existingRow.UseIncurDate = response.Value.UseIncurredDate;
+
+            existingRow.Comment = response.Value.Comment;
+
+            await _dialogService.ShowAsync(
+                "Success - Modify Record",
+                "Record updated successfully.");
+        }
+        else
+        {
+            await _dialogService.ShowAsync(
+                "Error - Modify Record",
+                "Unable to update record.");
         }
     }
-
-    public static void ClearSelectionId(
-        string? type,
-        IGroupHoldoverLookupModel model)
+    finally
     {
-        switch (type)
-        {
-            case "ParentGroupUD":
-                model.ParentEmployerGroupId = null;
-                break;
-
-            case "EmployerGroupUD":
-                model.EmployerGroupId = null;
-                break;
-
-            case "Contract":
-                model.GroupContractId = null;
-                break;
-
-            case "Benefit":
-                model.BenefitPlanId = null;
-                break;
-        }
+        IsBusy = false;
     }
-}
-
-
-// ==========================
-// 5. LOOKUP SUGGESTION MODEL
-// ==========================
-public class LookupSuggestion
-{
-    public int Id { get; set; }
-    public string? DisplayText { get; set; }
-}
-
-
-// ==========================
-// 6. USAGE - BOTH SCREENS
-// ==========================
-
-// SuggestionChosen
-private void AutoSuggest_SuggestionChosen(
-    AutoSuggestBox sender,
-    AutoSuggestBoxSuggestionChosenEventArgs args)
-{
-    if (args.SelectedItem is not LookupSuggestion selected)
-        return;
-
-    sender.Text = selected.DisplayText;
-
-    // SEARCH PAGE:
-    AutoSuggestSelectionHelper.ApplySelection(
-        sender.Tag?.ToString(),
-        selected,
-        ViewModel.SearchCriteria);
-
-    // DIALOG:
-    // AutoSuggestSelectionHelper.ApplySelection(
-    //     sender.Tag?.ToString(),
-    //     selected,
-    //     ViewModel.GroupHoldoverRow);
-}
-
-
-// TextChanged
-private async void AutoSuggest_TextChanged(
-    AutoSuggestBox sender,
-    AutoSuggestBoxTextChangedEventArgs args)
-{
-    if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
-        return;
-
-    // SEARCH PAGE:
-    AutoSuggestSelectionHelper.ClearSelectionId(
-        sender.Tag?.ToString(),
-        ViewModel.SearchCriteria);
-
-    // DIALOG:
-    // AutoSuggestSelectionHelper.ClearSelectionId(
-    //     sender.Tag?.ToString(),
-    //     ViewModel.GroupHoldoverRow);
-
-    var text = sender.Text?.Trim() ?? string.Empty;
-
-    if (text.Length < 4)
-    {
-        sender.ItemsSource = null;
-        return;
-    }
-
-    sender.ItemsSource = await ViewModel.GetLookupSuggestionsAsync(
-        sender.Tag?.ToString(),
-        text);
 }
