@@ -22,3 +22,20 @@ We want to modify logic to pull npi from mcr_dc_prod.dbo.claim.rendering_provide
 NPI should be pulled from from mcr_dc_prod.dbo.claim.rendering_provider_npi
 
 PULL the Tax id from from edee.dbo.x12_837_2010AX_REF.L2000AX_ref02_reference where L2000AX_ref01_code = 'EI'
+
+
+select top 1 @temp_claim_id = c.claim_id
+from mcr_dc_prod.dbo.claim c
+inner join edee.dbo.x12_837_2010AX_REF ref with (nolock)
+    on ref.claim_id = c.claim_id -- confirm actual join key
+   and ref.L2000AX_ref01_code = 'EI'
+inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d with (nolock)
+    on d.tin = ref.L2000AX_ref02_reference
+   and d.npi = c.rendering_provider_npi
+   and d.deleted = 0
+   and d.effdate <= c.first_from_service_date
+   and (
+        d.termdate >= c.first_from_service_date
+        or d.termdate is null
+   )
+where c.claim_id = @claim_id;
