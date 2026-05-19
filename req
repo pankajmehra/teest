@@ -39,3 +39,25 @@ inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d with (nolock)
         or d.termdate is null
    )
 where c.claim_id = @claim_id;
+
+
+select top 1 @temp_claim_id = c.claim_id
+from dbo.claim c with (nolock)
+inner join edee.dbo.x12_837_2300 ec with (nolock)
+    on ec.claim_id = c.claim_id
+inner join edee.dbo.x12_837_2010AX p with (nolock)
+    on ec.x12_837_2000A_id = p.x12_837_2000A_id
+inner join edee.dbo.x12_837_2010AX_REF r with (nolock)
+    on r.x12_837_2010AX_id = p.x12_837_2010AX_id
+inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d with (nolock)
+    on d.tin = left(isnull(r.L2000AX_ref02_reference, ''), 10)
+   and d.npi = c.rendering_provider_npi
+   and d.deleted = 0
+   and d.effdate <= c.first_from_service_date
+   and (
+        d.termdate >= c.first_from_service_date
+        or d.termdate is null
+   )
+where c.claim_id = @claim_id
+  and p.L2010AX_nm101_entity_id_code = '85'
+  and r.L2000AX_ref01_code = 'EI';
