@@ -302,3 +302,263 @@ NEXT_CLAIM:
 				,	@error_message	
 				,	@trading_partner_id )
 		end
+if @debug = 1
+		begin
+			insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+			values (
+					7
+				,	'wf_ib_21_837_import - before repriced claim reply check.'
+				,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
+				,	null
+				,	@instance_id
+				,	0
+				,	@error_message	
+				,	@trading_partner_id )
+		end
+		--------------------------------------------------
+		--	Did we send this claim out for repricing?
+		--------------------------------------------------
+		if @can_be_repriced_claim_reply = 1
+		begin
+			if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - start repriced claim reply.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+			--------------------------------------------------
+			--	Search the known locations for our claim_id
+			--------------------------------------------------	
+			select @2300_REF_F8 = r.L2300_ref02_reference
+			from dbo.x12_837_2300_REF r 
+			where x12_837_2300_id = @x12_837_2300_id
+				and L2300_ref01_code = 'F8'
+
+			select @2300_REF_D9 = r.L2300_ref02_reference
+			from dbo.x12_837_2300_REF r 
+			where x12_837_2300_id = @x12_837_2300_id
+				and L2300_ref01_code = 'D9'
+
+			select @2300_REF_9A = r.L2300_ref02_reference
+			from dbo.x12_837_2300_REF r 
+			where x12_837_2300_id = @x12_837_2300_id
+				and L2300_ref01_code = '9A'
+						
+			--if len(@2300_REF_F8) <> 8 or isnumeric(@2300_REF_F8) = 0			
+			if len(@2300_REF_F8) not in (8,9) or isnumeric(@2300_REF_F8) = 0  ----39546
+				set @2300_REF_F8 = null
+
+			--if len(@2300_REF_D9) <> 8 or isnumeric(@2300_REF_D9) = 0
+			if len(@2300_REF_D9) not in (8,9) or isnumeric(@2300_REF_D9) = 0  ----39546
+				set @2300_REF_D9 = null
+
+			--if len(@2300_REF_9A) <> 8 or isnumeric(@2300_REF_9A) = 0
+			if len(@2300_REF_9A) not in (8,9) or isnumeric(@2300_REF_9A) = 0  ----39546
+				set @2300_REF_9A = null
+
+
+			if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - searched for claim_id in REF.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+
+			if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - search repricing claim history for claim_id F8.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+			--------------------------------------------------
+			--	Are we waiting for one of the possible claim numbers to come back with pricing?
+			--	1. Check to see if we're waiting for a claim from this vendor.
+			--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
+			--------------------------------------------------
+			if @2300_REF_F8 is not null
+			begin
+
+				--	1. Check to see if we're waiting for a claim from this vendor.
+				select top 1 @repricing_claim_history_id_F8 = h.repricing_claim_history_id
+				from dbo.repricing_claim_history h 
+					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+				where h.deleted = 0 
+					and h.outbound_file_id is not null 
+					and h.inbound_file_id is null		--	waiting for pricing data
+					and h.claim_id = convert(int,@2300_REF_F8)
+					and datediff(month,h.created_date,getdate()) < 12 
+					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+					and ft.trading_partner_id = @trading_partner_id
+				order by h.repricing_claim_history_id desc
+				
+				if @repricing_claim_history_id_F8 is not null
+				begin
+					set @2300_REF_F8_current_claim = 1
+				end
+
+				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
+				if @2300_REF_F8_current_claim = 0
+					and exists (
+					select 1 
+					from dbo.repricing_claim_history h 
+						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+					where h.deleted = 0 
+						and h.outbound_file_id is not null 
+						and h.inbound_file_id is not null	--	no longer waiting for pricing data
+						and h.claim_id = convert(int,@2300_REF_F8)
+						and datediff(month,h.created_date,getdate()) < 12 
+						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+						and ft.trading_partner_id = @trading_partner_id
+				)
+				begin
+					set @2300_REF_F8_previous_claim = 1
+				end
+
+			end
+
+			if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - search repricing claim history for claim_id D9.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_D9 : ' + isnull(convert(varchar,@2300_REF_D9), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+
+			if @2300_REF_D9 is not null
+			begin
+				--	1. Check to see if we're waiting for a claim from this vendor.
+				select top 1 @repricing_claim_history_id_D9 = h.repricing_claim_history_id
+				from dbo.repricing_claim_history h 
+					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+				where h.deleted = 0 
+					and h.outbound_file_id is not null 
+					and h.inbound_file_id is null		--	waiting for pricing data
+					and h.claim_id = convert(int,@2300_REF_D9)
+					and datediff(month,h.created_date,getdate()) < 12 
+					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+					and ft.trading_partner_id = @trading_partner_id
+				order by h.repricing_claim_history_id desc
+
+				if @repricing_claim_history_id_D9 is not null
+				begin
+					set @2300_REF_D9_current_claim = 1
+				end
+
+				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
+				if @2300_REF_D9_current_claim = 0
+					and exists (
+					select 1 
+					from dbo.repricing_claim_history h 
+						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+					where h.deleted = 0 
+						and h.outbound_file_id is not null 
+						and h.inbound_file_id is not null	--	no longer waiting for pricing data
+						and h.claim_id = convert(int,@2300_REF_D9)
+						and datediff(month,h.created_date,getdate()) < 12 
+						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+						and ft.trading_partner_id = @trading_partner_id
+				)
+				begin
+					set @2300_REF_D9_previous_claim = 1
+				end
+			end
+
+			if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - search repricing claim history for claim_id 9A.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_9A : ' + isnull(convert(varchar,@2300_REF_9A), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+
+			if @2300_REF_9A is not null
+			begin
+
+				--	1. Check to see if we're waiting for a claim from this vendor.
+				select top 1 @repricing_claim_history_id_9A = h.repricing_claim_history_id
+				from dbo.repricing_claim_history h 
+					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+				where h.deleted = 0 
+					and h.outbound_file_id is not null 
+					and h.inbound_file_id is null		--	waiting for pricing data
+					and h.claim_id = convert(int,@2300_REF_9A)
+					and datediff(month,h.created_date,getdate()) < 12 
+					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+					and ft.trading_partner_id = @trading_partner_id
+				order by h.repricing_claim_history_id desc
+
+				if @repricing_claim_history_id_9A is not null
+				begin
+					set @2300_REF_9A_current_claim = 1
+				end
+
+				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
+				if @2300_REF_9A_current_claim = 0
+					and exists (
+					select 1 
+					from dbo.repricing_claim_history h 
+						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
+						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
+					where h.deleted = 0 
+						and h.outbound_file_id is not null 
+						and h.inbound_file_id is not null	--	no longer waiting for pricing data
+						and h.claim_id = convert(int,@2300_REF_9A)
+						and datediff(month,h.created_date,getdate()) < 12 
+						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
+
+						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
+					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
+						and ft.trading_partner_id = @trading_partner_id
+				)
+				begin
+					set @2300_REF_9A_previous_claim = 1
+				end
+			end
