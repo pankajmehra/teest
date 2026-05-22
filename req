@@ -1,63 +1,29 @@
-                    select top 1 @temp_claim_id = c.claim_id
-                    from claim c 
-                    inner join mcr_dc_prod.dbo.provider_id_map m0 (nolock) on m0.provider_id = c.provider_id -- 837
-                                        and m0.provider_id_map_category_id in (6, 9)
-                                        and m0.active = 1
-                                        and m0.deleted = 0
-                    inner join mcr_dc_prod.dbo.provider_id_map m1 (nolock) on m1.provider_id = c.provider_id --mcr_claim.renderingprovidernpi
-                                        and m1.provider_id_map_category_id in (11, 12)
-                                        and m1.active = 1
-                                        and m1.deleted = 0
-                    inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d (nolock) on 
-                                            d.tin = m0.tax_id
-                                        and d.npi = m1.provider_id_map_ud
-                                        and d.deleted = 0
-                                        and (d.effdate <= c.first_from_service_date and (d.termdate >= c.first_from_service_date or d.termdate is null))
-                    where c.claim_id = @claim_id
+Description: 
+
+ 
+
+As pricing config, I want claims to go to their designated review queue if they are returned on an inbound file from a trading partner, but was skipped due to errors on the file. (see #45385)
+
+
+
+
+
+
+
+ 
+
+Objectives:
+
+ 
 
 We need to deliver the following:
 
-We want to modify logic to pull npi from mcr_dc_prod.dbo.claim.rendering_provider_npi AND pull tax id from billing provider tax id on x12  (edee.dbo.x12_837_2010AX_REF.L2000AX_ref02_reference)
+If a claim is received back on an inbound file with errors and the pricing does not get imported due to it, I want the claim the pricing was for to be moved out of the in process queue and into the associated review queue with a comment indicating the pricing was not loaded due to file errors.  
+Claim comment: 'This claim was returned on 'trading_partner_filename' but could not be imported due to (error reason)
+claim workflow id that claim should be updated to, will come from the corresponding repricing config for that trading partner
+ 
 
-NPI should be pulled from from mcr_dc_prod.dbo.claim.rendering_provider_npi
+Additional Information:
 
-PULL the Tax id from from edee.dbo.x12_837_2010AX_REF.L2000AX_ref02_reference where L2000AX_ref01_code = 'EI'
+proc: wf_21_837_import
 
-
-select top 1 @temp_claim_id = c.claim_id
-from mcr_dc_prod.dbo.claim c
-inner join edee.dbo.x12_837_2010AX_REF ref with (nolock)
-    on ref.claim_id = c.claim_id -- confirm actual join key
-   and ref.L2000AX_ref01_code = 'EI'
-inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d with (nolock)
-    on d.tin = ref.L2000AX_ref02_reference
-   and d.npi = c.rendering_provider_npi
-   and d.deleted = 0
-   and d.effdate <= c.first_from_service_date
-   and (
-        d.termdate >= c.first_from_service_date
-        or d.termdate is null
-   )
-where c.claim_id = @claim_id;
-
-
-select top 1 @temp_claim_id = c.claim_id
-from dbo.claim c with (nolock)
-inner join edee.dbo.x12_837_2300 ec with (nolock)
-    on ec.claim_id = c.claim_id
-inner join edee.dbo.x12_837_2010AX p with (nolock)
-    on ec.x12_837_2000A_id = p.x12_837_2000A_id
-inner join edee.dbo.x12_837_2010AX_REF r with (nolock)
-    on r.x12_837_2010AX_id = p.x12_837_2010AX_id
-inner join mcr_dc_prod.dbo.hch_direct_provider_demographics d with (nolock)
-    on d.tin = left(isnull(r.L2000AX_ref02_reference, ''), 10)
-   and d.npi = c.rendering_provider_npi
-   and d.deleted = 0
-   and d.effdate <= c.first_from_service_date
-   and (
-        d.termdate >= c.first_from_service_date
-        or d.termdate is null
-   )
-where c.claim_id = @claim_id
-  and p.L2010AX_nm101_entity_id_code = '85'
-  and r.L2000AX_ref01_code = 'EI';
