@@ -1,167 +1,304 @@
-// ===============================
-// 1) ADD DoubleTapped TO YOUR DATAGRID XAML
-// ===============================
+SE [Edee]
+GO
+/****** Object:  StoredProcedure [dbo].[wf_ib_21_837_import]    Script Date: 4/13/2026 10:45:49 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[wf_ib_21_837_import]
+	@p_x12_file_id [int],
+	@p_x12_interchange_id [int] = null,
+	@p_x12_functional_group_id [int] = null,
+	@p_x12_transaction_id [int] = null,
+	@p_x12_837_2300_id [int] = null,
+	@p_reload_claim [bit] = 0,
+	@instance_id [uniqueidentifier] = null
+with execute as caller
+as
+begin
 
 /*
-<controls:DataGrid x:Name="DataGrid"
-                   ...
-                   DoubleTapped="DataGrid_DoubleTapped">
-</controls:DataGrid>
+************************************************************************
+Name:			
+Description:	import 837 claim
+Used by:		Repricing Config Team
+Test harness:	Call by wf_ib_process
+		exec wf_ib_21_837_import
+			@p_x12_file_id = 4311284,
+			@p_x12_interchange_id = 4286323,
+			@p_x12_functional_group_id = 4282131,
+			@p_x12_transaction_id =59209329 ,
+			@p_x12_837_2300_id =93088092,
+			@p_reload_claim  = 0,
+			@instance_id = null
+	
+Execution time: every hrs
+Return values:  n/a
+History:
+Created: 
+Created DevOps Story:	
+Modified:		
+	02/09/2023 - PL Wave4 migration. Remove link server SQLReporting due to Object reference it migrate to same SQL instance WTPWSQLAGC01.
+	02/04/2025  39546 PL Claim ID Digit Limit (len expand from 8 - 9)
+	04/09/2025	40374 JEM
+	20260206	45274 JRO - @possible_reworked_claim bug causing @must_be_repriced_claim_reply to not behave correctly
+    03/09/2026          JEM PCE changes
+	04/02/2026          add back goto with wrapper to ignore transactions
+    04/08/2026	45918 PL  - Fix error Claim has already been repriced.  This due to trading partner resend Dup claim.
+	04/13/2026	45385	jm	Automatically Loop through Errored Files Inbound Files
+
+*************************************************************************
 */
 
 
-// ===============================
-// 2) ADD THIS CONSTRUCTOR TO GroupHoldoverDialogViewModel
-// Keep your existing constructor if you want.
-// This one is for edit mode.
-// ===============================
 
-public GroupHoldoverDialogViewModel(
-    IGroupHoldoverAutoSuggestService autoSuggestService,
-    GroupHoldOverModel existingRecord)
-{
-    _autoSuggestService = autoSuggestService;
-
-    GroupHoldoverRow = existingRecord;
-
-    IsEditMode = true;
-}
+	SET NOCOUNT ON
 
 
-// ===============================
-// 3) ADD THESE PROPERTIES TO GroupHoldoverDialogViewModel
-// Optional, only if you want title/button text to change.
-// ===============================
+	--------------------------------------------------
+	--  Error messages during processing
+	--------------------------------------------------
+	declare @errmsg						varchar(max)
+	declare @errcode					varchar(10)
+	declare @return						int
 
-public bool IsEditMode { get; private set; }
+	--------------------------------------------------
+	--  Working variables
+	--------------------------------------------------
+	declare @trading_partner_id			int
+	declare @trading_partner_file_type_id	int
+	declare @inbound_file_id			int
+	declare @x12_file_id				int
+	declare @x12_interchange_id			int
+	declare @x12_functional_group_id	int
+	declare @x12_transaction_id			int
+	declare @x12_837_2300_id			int
+	declare @is_repriced_claim_reply	bit
+	declare @must_be_repriced_claim_reply	bit
+	declare @can_be_repriced_claim_reply	bit
+	declare @possible_reworked_claim	bit
 
-public string DialogTitle => IsEditMode ? "Modify Record" : "Add New Record";
+	declare @repricing_claim_history_id	int
 
-public string SaveButtonText => IsEditMode ? "Update" : "Save";
+	declare @repricing_claim_history_id_F8		int
+	declare @repricing_claim_history_id_D9		int
+	declare @repricing_claim_history_id_9A		int
+
+	declare @2300_REF_F8				varchar(30)	--	our claim id returned by the trading partner
+	declare @2300_REF_D9				varchar(30)	--	our claim id returned by the trading partner
+	declare @2300_REF_9A				varchar(30)	--	our claim id returned by the trading partner
+	
+	declare @2300_REF_F8_current_claim	bit
+	declare @2300_REF_D9_current_claim	bit
+	declare @2300_REF_9A_current_claim	bit
+
+	declare @2300_REF_F8_previous_claim	bit
+	declare @2300_REF_D9_previous_claim	bit
+	declare @2300_REF_9A_previous_claim	bit
+
+	declare @x12_version_id_code		varchar(12)
+	declare @found_error				bit
+	
+	declare @is_transactional bit 
+	set @is_transactional = 0
+
+	--	45385
+	declare @inprocess_claim_workflow_id		int
+		,	@claim_workflow_id					int
+
+	if @p_reload_claim is null set @p_reload_claim = 0
+
+	---------------------------------------------
+	--  Error Messages
+	---------------------------------------------
+	declare @error_message				nvarchar(4000)
+	declare @error_number				int
+	declare @debug						int
+
+	declare @program_data				varchar(max)
+
+	---------------------------------------------
+	--  Start
+	---------------------------------------------
+	set @instance_id = isnull(@instance_id, NEWID())
+	set @return	= 0
+	set @error_number = 0
+	set @debug = 0
+
+	set @program_data = '@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ': 12_file_id = ' + isnull(convert(varchar,@p_x12_file_id),'null')	-- program_data
+
+	insert into application_log (
+			application_type_id
+		,	program_step
+		,	program_data
+		,	stack_trace
+		,	instance_id
+		,	is_error
+		,	error_message	
+		,	trading_partner_id)
+	values (
+			7
+		,	'wf_ib_21_837_import - Start.'
+		,	@program_data
+		,	null
+		,	@instance_id
+		,	0
+		,	@error_message	
+		,	null ) --@p_trading_partner_id)
+
+	select @is_transactional = i.is_transactional
+	  from x12_file x
+		inner join inbound_file i on i.inbound_file_id = x.inbound_file_id
+	  where x.x12_file_id = @p_x12_file_id
 
 
-// ===============================
-// 4) OPTIONAL XAML CHANGE IN DIALOG
-// Only if you want dialog title/button text to change.
-// ===============================
 
-/*
-<TextBlock Text="{x:Bind ViewModel.DialogTitle, Mode=OneWay}" />
+	--------------------------------------------------
+	--  Process each claim we find from our input parms
+	--------------------------------------------------
+NEXT_CLAIM:
 
-<Button Content="{x:Bind ViewModel.SaveButtonText, Mode=OneWay}"
-        Click="SaveButton_Click" />
-*/
+	set @x12_837_2300_id = null
 
+	select top 1
+		@trading_partner_id = f.trading_partner_id
+	,	@trading_partner_file_type_id = f.trading_partner_file_type_id
+	,	@x12_file_id = xf.x12_file_id
+	,	@x12_interchange_id = i.x12_interchange_id
+	,	@x12_functional_group_id = g.x12_functional_group_id
+	,	@x12_version_id_code = g.gs08_version_id_code
+	,	@x12_transaction_id = t.x12_transaction_id
+	,	@x12_837_2300_id = c.x12_837_2300_id
+	,	@can_be_repriced_claim_reply = ft.is_repriced_claim_reply
+	,	@must_be_repriced_claim_reply = ft.must_be_repriced_claim_reply
+	from inbound_file f
+		inner join x12_file xf on f.inbound_file_id = xf.inbound_file_id
+		inner join x12_interchange i  on xf.x12_file_id = i.x12_file_id
+		inner join x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
+		inner join x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
+		inner join x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
+		inner join trading_partner_file_type ft on f.trading_partner_file_type_id = ft.trading_partner_file_type_id
+	where 
+		xf.x12_file_id = @p_x12_file_id
+		and ( @p_x12_interchange_id is null or i.x12_interchange_id = @p_x12_interchange_id )
+		and ( @p_x12_functional_group_id is null or g.x12_functional_group_id = @p_x12_functional_group_id )
+		and ( @p_x12_transaction_id is null or t.x12_transaction_id = @p_x12_transaction_id )
+		and ( @p_x12_interchange_id is null or i.x12_interchange_id = @p_x12_interchange_id )
+		and ( @p_x12_837_2300_id is null or c.x12_837_2300_id = @p_x12_837_2300_id )
+		--  only professional, dental, institutional claims
+		--and g.gs08_version_id_code in ( '004010X098A1','004010X097A1','004010X096A1' )
+		and g.gs08_version_id_code in ( '004010X098A1','004010X097A1','004010X096A1','005010X222','005010X222A1','005010X223','005010X223A2','005010X224A2','005010X291','005010X292')
+		--  skipped errors and claims we tagged as processed
+		and c.error = 0
+		and c.processed = 0
+		--  only files ready to import
+		and f.deleted = 0
+		and f.error = 0
+		and xf.deleted = 0
+		and xf.error = 0
+		and xf.is_parsed = 1
+		and xf.is_imported = 0
 
-// ===============================
-// 5) ADD DOUBLE-CLICK METHOD IN SEARCH PAGE XAML.CS
-// ===============================
+	--	and f.inbound_file_id = 2932957
 
-private async void DataGrid_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-{
-    if (DataGrid.SelectedItem is not GroupHoldoverTableSearchResult selectedRow)
-        return;
+	--	and f.trading_partner_id <> 276		--	Park Cigna until I can walk the first files.
+	--	and f.trading_partner_file_type_id not in (1732)	--	CIGNA Inbound Institutional P4P Claims
+	--	and f.trading_partner_file_type_id not in (1733)	--	CIGNA Inbound Professional P4P Claims
+	--	and f.trading_partner_file_type_id in (1732, 1733)	--	CIGNA Inbound P4P Claims
+	--	and f.inbound_file_id = 1644898
+	--	and f.trading_partner_file_type_id not in (3331)	--	Hygieia Wellness Claim File
 
-    var editModel = new GroupHoldOverModel
-    {
-        // important: this makes API update instead of insert
-        GroupHoldoverTableId = selectedRow.GroupHoldoverId,
+	--	and f.trading_partner_id <> 537						--	HMS - Healthcare Management Solutions
 
-        Source = selectedRow.Source,
+	--	and f.trading_partner_id <> 589		--	Hold BCBSFL files until we find the "replayed" one...walk each one through parsing but not importing.
 
-        ParentEmployerGroupId = selectedRow.ParentEmployerGroupId,
-        ParentEmployerGroupUd = selectedRow.ParentEmployerGroupUd,
+	--	and f.trading_partner_id = 99		--	Hold Aetna round trip so I can see if the external edits for Stewardship are working.
 
-        EmployerGroupId = selectedRow.EmployerGroupId,
-        EmployerGroupUd = selectedRow.EmployerGroupUd,
+	--	and f.trading_partner_id <> 99		--	Hold Aetna round trip so I can see if the new repricing flag lookup works.
 
-        GroupContractId = selectedRow.GroupContractId,
-        GroupContractUd = selectedRow.GroupContractUd,
+	--	and f.trading_partner_id <> 683		--	Mercy	Mercy Benefit Administrators
 
-        BenefitPlanId = selectedRow.BenefitPlanId,
-        BenefitPlanUd = selectedRow.BenefitPlanUd,
+	order by
+		i.x12_interchange_id
+	,	g.x12_functional_group_id
+	,	t.x12_transaction_id
+	,	c.x12_837_2300_id
 
-        EffectiveDate = selectedRow.EffectiveDate,
-        ThruDate = selectedRow.ThruDate,
+	if @debug = 1
+	begin
+		insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+		values (
+				7
+			,	'wf_ib_21_837_import - process claim.'
+			,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
+			,	null
+			,	@instance_id
+			,	0
+			,	@error_message	
+			,	@trading_partner_id )
+	end
 
-        UseReceiveDate = selectedRow.UseReceiveDate,
-        UseIncurredDate = selectedRow.UseIncurDate,
+	if @debug = 1
+	begin
+		insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+		values (
+				7
+			,	'wf_ib_21_837_import - Verify batchjoblookup DB.'
+			,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
+			,	null
+			,	@instance_id
+			,	0
+			,	@error_message	
+			,	@trading_partner_id )
+	end
+	--------------------------------------------------
+	--  Verify lookup database is available before processing files
+	--------------------------------------------------
+	if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
+	begin
+		print 'Batch job lookup database is unavailable...ending imports'
+		return (0)
+	end
 
-        Comment = selectedRow.Comment
-    };
+	--------------------------------------------------
+	--	Reset locals for each claim
+	--------------------------------------------------
+	set @is_repriced_claim_reply = 0
+	set @possible_reworked_claim = 0
 
-    var dialogVm = new GroupHoldoverDialogViewModel(
-        _autoSuggestService,
-        editModel);
+	set @repricing_claim_history_id = null
 
-    var dialog = new GroupHoldoverDialog(dialogVm)
-    {
-        XamlRoot = this.XamlRoot
-    };
+	set @repricing_claim_history_id_F8 = null
+	set @repricing_claim_history_id_D9 = null
+	set @repricing_claim_history_id_9A = null
 
-    await dialog.ShowAsync();
+	set @2300_REF_F8 = null
+	set @2300_REF_D9 = null
+	set @2300_REF_9A = null
 
-    if (!dialog.IsCancelRequested && dialog.ViewModel.GroupHoldoverRow != null)
-    {
-        await ViewModel.UpdateAsync(
-            dialog.ViewModel.GroupHoldoverRow,
-            selectedRow);
-    }
-}
+	set @2300_REF_F8_current_claim = 0
+	set @2300_REF_D9_current_claim = 0
+	set @2300_REF_9A_current_claim = 0
 
+	set @2300_REF_F8_previous_claim = 0
+	set @2300_REF_D9_previous_claim = 0
+	set @2300_REF_9A_previous_claim = 0
 
-// ===============================
-// 6) ADD UpdateAsync TO SEARCH VIEWMODEL
-// ===============================
-
-public async Task UpdateAsync(
-    GroupHoldOverModel model,
-    GroupHoldoverTableSearchResult existingRow)
-{
-    try
-    {
-        IsBusy = true;
-
-        // same API as add, but GroupHoldoverTableId > 0 means update
-        var response = await _provider.AddGroupHoldoverAsync(model);
-
-        if (response.IsSuccess)
-        {
-            existingRow.Source = response.Value.Source;
-
-            existingRow.ParentEmployerGroupId = response.Value.ParentEmployerGroupId;
-            existingRow.ParentEmployerGroupUd = response.Value.ParentEmployerGroupUd;
-
-            existingRow.EmployerGroupId = response.Value.EmployerGroupId;
-            existingRow.EmployerGroupUd = response.Value.EmployerGroupUd;
-
-            existingRow.GroupContractId = response.Value.GroupContractId;
-            existingRow.GroupContractUd = response.Value.GroupContractUd;
-
-            existingRow.BenefitPlanId = response.Value.BenefitPlanId;
-            existingRow.BenefitPlanUd = response.Value.BenefitPlanUd;
-
-            existingRow.EffectiveDate = response.Value.EffectiveDate;
-            existingRow.ThruDate = response.Value.ThruDate;
-
-            existingRow.UseReceiveDate = response.Value.UseReceiveDate;
-            existingRow.UseIncurDate = response.Value.UseIncurredDate;
-
-            existingRow.Comment = response.Value.Comment;
-
-            await _dialogService.ShowAsync(
-                "Success - Modify Record",
-                "Record updated successfully.");
-        }
-        else
-        {
-            await _dialogService.ShowAsync(
-                "Error - Modify Record",
-                "Unable to update record.");
-        }
-    }
-    finally
-    {
-        IsBusy = false;
-    }
-}
+	--------------------------------------------------
+	--  Import Claim
+	--------------------------------------------------
+	if @x12_837_2300_id is not null
+	begin
+		if @debug = 1
+		begin
+			insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+			values (
+					7
+				,	'wf_ib_21_837_import - start import'
+				,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
+				,	null
+				,	@instance_id
+				,	0
+				,	@error_message	
+				,	@trading_partner_id )
+		end
