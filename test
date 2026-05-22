@@ -562,3 +562,498 @@ if @debug = 1
 					set @2300_REF_9A_previous_claim = 1
 				end
 			end
+if @debug = 1
+			begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+				values (
+						7
+					,	'wf_ib_21_837_import - stop - search repricing_claim_history for claim_id.'
+					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
+					,	null
+					,	@instance_id
+					,	0
+					,	@error_message	
+					,	@trading_partner_id )
+			end
+			--------------------------------------------------
+			--	Did we find a good claim number for which we're awaiting pricing information?
+			--------------------------------------------------
+			set @repricing_claim_history_id = null
+
+			if @2300_REF_F8_current_claim = 1
+			begin
+				set @repricing_claim_history_id = @repricing_claim_history_id_F8
+			end
+			else if @2300_REF_D9_current_claim = 1
+			begin
+				set @repricing_claim_history_id = @repricing_claim_history_id_D9
+			end
+			else if @2300_REF_9A_current_claim = 1
+			begin
+				set @repricing_claim_history_id = @repricing_claim_history_id_9A
+			end
+
+			set @is_repriced_claim_reply = 0
+
+			if @repricing_claim_history_id is not null
+				set @is_repriced_claim_reply = 1
+
+			--	If we're not waiting on the claim, have we ever sent it out?  Sometimes a vendor may accidentally send us a round trip priced claim twice by error.
+			if @repricing_claim_history_id is null
+			begin
+				if @2300_REF_F8_previous_claim = 1
+					or @2300_REF_D9_previous_claim = 1
+					or @2300_REF_9A_previous_claim = 1
+				begin
+					-----------------------------------------------
+					--	Our re-priced claim but we're no longer expecting a reply.  Perhaps the vendor is sending us updated pricing.
+					--	Does this appear to be a reworked claim?  Test every way that we can receive a "reworked" or "adjusted" claim.
+					-----------------------------------------------
+					if @possible_reworked_claim = 0 and exists (
+						select 1
+						from dbo.x12_837_2300 c
+						where c.x12_837_2300_id = @x12_837_2300_id
+							and c.L2300_hcp01_pricing_methodology = '14'	--	Adjustment
+					)
+					begin
+						set @possible_reworked_claim = 1
+					end
+
+					if @possible_reworked_claim = 0 and exists (
+						select 1
+						from x12_837_2300 c
+						--left join x12_837_2300_REF r on c.x12_837_2300_id = r.x12_837_2300_id and L2300_ref01_code = '9C'	--45274
+						inner join x12_837_2300_REF r on c.x12_837_2300_id = r.x12_837_2300_id and L2300_ref01_code = '9C'	--45274
+						where c.x12_837_2300_id = @x12_837_2300_id
+					)
+					begin
+						set @possible_reworked_claim = 1
+					end
+
+					-----------------------------------------------
+					--	This trading partner file type MUST be a round-trip repriced claim.
+					--	If it isn't, and it's not a reworked claim, blow up the claim and the file.
+					--	Abort processing the file and review what the heck is going on here.
+					-----------------------------------------------
+					if @is_repriced_claim_reply = 0 
+						and @possible_reworked_claim = 0 
+					begin
+						-- Begin 45918
+						--	45385	-	Phan, Jim & I talked. Modify below code to not only look at Medica claims 
+						IF EXISTS (SELECT 1 
+										FROM dbo.x12_837_2300_REF ref 
+										INNER JOIN mcr_dc_prod.dbo.claim ci on ci.claim_id = ref.L2300_ref02_reference
+										WHERE ref.x12_837_2300_id = @x12_837_2300_id
+										  AND ref.L2300_ref01_code = 'F8'
+										  AND ISNUMERIC(ref.L2300_ref02_reference) = 1
+									 )
+							-- Bypass dup claim
+							--	45385	--	check repricing_configuration.inprocess_claim_workflow_id against current claim workflow id
+							begin
+
+								set @inprocess_claim_workflow_id = null
+								set @claim_workflow_id = null
+
+								-- doing this here, for the 1 to 35+ claims in the file, rather than every inbound file
+								select @inprocess_claim_workflow_id = @trading_partner_file_type_id
+								from dbo.repricing_configuration (nolock)
+								where inbound_trading_partner_file_type_id = @trading_partner_file_type_id
+
+								select @claim_workflow_id = c.claim_workflow_id
+								from dbo.x12_837_2300_REF ref 
+								inner join mcr_dc_prod.dbo.claim c on c.claim_id = ref.L2300_ref02_reference
+								WHERE ref.x12_837_2300_id = @x12_837_2300_id
+									AND ref.L2300_ref01_code = 'F8'
+									AND ISNUMERIC(ref.L2300_ref02_reference) = 1
+
+								if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
+								begin
+									update x12_837_2300 set error = 1, processed = 1 WHERE x12_837_2300_id = @x12_837_2300_id --and error = 0
+									GOTO NEXT_CLAIM
+								end
+							end
+						--End 45918
+						ELSE
+							BEGIN
+								--	This claim has already been priced by the vendor and we're not expecting "reworked" claims from this vendor.
+								set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  We have received re-priced claim data but this claim has already been re-priced.  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+								exec x12_error_message
+												@x12_file_id = @x12_file_id,
+												@x12_interchange_id = @x12_interchange_id,
+												@x12_functional_group_id = @x12_functional_group_id,
+												@x12_transaction_id = @x12_transaction_id,
+												@x12_record_id = @x12_837_2300_id,
+												@x12_record_table = 'x12_837_2300',
+												@message_text = @errmsg
+
+								-- mark the claim as an error if it isn't already
+								update x12_837_2300 set error = 1
+								where x12_837_2300_id = @x12_837_2300_id
+									and error = 0
+
+								-- stop processing this file
+								--return 1			--	45385
+								if (@is_transactional = 0)
+									goto NEXT_CLAIM
+								else
+									return 1
+                            END
+							--	END -- 45385
+					end
+				end
+			end
+		end	
+		
+--		if @2300_REF_F8 = '15331232' set @is_repriced_claim_reply = 0		--	Fluke where a one-way CareVue claim exactly matched a round trip MultiPlan claim
+		
+
+		--------------------------------------------------
+		--	Is this partner ONLY doing round trip claims on the pipe?
+		--	If so this MUST have a repricing claim history record.
+		--	No one-way claims allowed on a pipe that is slated for round-trip only.
+		--	If this an adjusted or reworked claim, we'll load it as a net-new claim from the vendor.
+		--------------------------------------------------
+		if @must_be_repriced_claim_reply = 1 
+			and @is_repriced_claim_reply = 0 
+			and @possible_reworked_claim = 0
+		--	and @x12_file_id <> 205586		--	 I manually pushed this one through on 06/14/2018
+		begin	
+			--------------------------------------------------
+			--  We not should get "direct" claims in a round trip file unless they're reworks.
+			--------------------------------------------------
+			set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  We have received a claim for a trading partner that MUST be re-priced, but we cant locate the claim_id.  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+			exec dbo.x12_error_message
+							@x12_file_id = @x12_file_id,
+							@x12_interchange_id = @x12_interchange_id,
+							@x12_functional_group_id = @x12_functional_group_id,
+							@x12_transaction_id = @x12_transaction_id,
+							@x12_record_id = @x12_837_2300_id,
+							@x12_record_table = 'x12_837_2300',
+							@message_text = @errmsg
+
+			-- mark the claim as an error if it isn't already
+			update dbo.x12_837_2300 set error = 1
+			where x12_837_2300_id = @x12_837_2300_id
+				and error = 0
+
+			-- stop processing this file
+			return 1	
+
+		end
+		
+		--------------------------------------------------
+		--  Repriced Claims -- We sent them out and now they're back
+		--------------------------------------------------
+		if @is_repriced_claim_reply = 1
+		--	and @x12_file_id <> 205586		--	 I manually pushed this one through on 06/14/2018
+		begin
+			begin try
+				-- try to import the claim
+				--------------------------------------------------
+				--  Verify lookup database is available before processing the claim
+				--------------------------------------------------
+				if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
+				begin
+					print 'Batch job lookup database is unavailable...ending imports'
+					return (0)
+				end
+				
+				if @debug = 1
+				begin
+				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+					values (
+							7
+						,	'wf_ib_21_837_import - call repriced reply import claim'
+						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
+						,	null
+						,	@instance_id
+						,	0
+						,	@error_message	
+						,	@trading_partner_id )
+				end
+
+				--if @x12_version_id_code = '004010X098A1'
+				if @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1' )
+					exec @return = dbo.wf_ib_2140_837p_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
+									
+				--if @x12_version_id_code = '004010X096A1'
+				if @x12_version_id_code in ( '004010X096A1','005010X223','005010X223A2' )
+					exec @return = dbo.wf_ib_2150_837i_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
+
+				--if @x12_version_id_code = '004010X097A1'
+				if @x12_version_id_code in ( '004010X097A1', '005010X224A2' )
+					exec @return = dbo.wf_ib_2160_837d_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
+
+				if @debug = 1
+				begin
+					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+					values (
+							7
+						,	'wf_ib_21_837_import - complete repriced reply import claim'
+						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
+						,	null
+						,	@instance_id
+						,	0
+						,	@error_message	
+						,	@trading_partner_id )
+				end
+			end try
+			begin catch
+				-- if we crashed in the above procedure it will likely be in the middle of a transaction.
+				--if @@trancount > 0 rollback transaction			--	45385
+
+				set @errmsg = 'Error executing ' + isnull(ERROR_PROCEDURE(),'') + ' for the record: x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + isnull(ERROR_MESSAGE(),'') + '  Generated by ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+				exec dbo.x12_error_message
+								@x12_file_id = @x12_file_id,
+								@x12_interchange_id = @x12_interchange_id,
+								@x12_functional_group_id = @x12_functional_group_id,
+								@x12_transaction_id = @x12_transaction_id,
+								@x12_record_id = @x12_837_2300_id,
+								@x12_record_table = 'x12_837_2300',
+								@message_text = @errmsg
+
+				-- mark the claim as an error if it isn't already
+				update dbo.x12_837_2300 set error = 1
+				where x12_837_2300_id = @x12_837_2300_id
+					and error = 0
+
+				return 1	
+
+			end catch
+
+			if @return = 1
+			begin
+				set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+				exec dbo.x12_error_message
+								@x12_file_id = @x12_file_id,
+								@x12_interchange_id = @x12_interchange_id,
+								@x12_functional_group_id = @x12_functional_group_id,
+								@x12_transaction_id = @x12_transaction_id,
+								@x12_record_id = @x12_837_2300_id,
+								@x12_record_table = 'x12_837_2300',
+								@message_text = @errmsg
+
+				-- mark the claim as an error if it isn't already
+				update dbo.x12_837_2300 set error = 1
+				where x12_837_2300_id = @x12_837_2300_id
+					and error = 0
+
+				return 1
+
+			end			
+		end
+
+		--------------------------------------------------
+		--  Direct one-way claim or a reworked round-trip claim.
+		--------------------------------------------------
+		if @is_repriced_claim_reply = 0
+		begin
+			begin try
+				-- try to import the claim
+				--------------------------------------------------
+				--  Verify lookup database is available before processing the claim
+				--------------------------------------------------
+				if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
+				begin
+					print 'Batch job lookup database is unavailable...ending imports'
+					return (0)
+				end
+
+				--	Sometimes we can get a dental claim in a professional claim file.
+				declare @is_dental_claim				bit
+
+				set @is_dental_claim = 0
+
+				if @trading_partner_id in (
+					449		--	Payer Compass
+					)
+					and @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1' )		--	Professional claim file
+				begin
+					if exists (	
+						select 1
+						--	select cp.L2400_sv101_proc_code_qual, cp.L2400_sv201_service_line_revenue_code, cp.L2400_sv301_dent_product_or_service_id_qualifier, c.x12_837_2300_id, *
+						from
+							dbo.trading_partner tp 
+							inner join dbo.inbound_file f  on tp.trading_partner_id = f.trading_partner_id
+							inner join dbo.x12_file xf  on f.inbound_file_id = xf.inbound_file_id
+							inner join dbo.x12_interchange i  on xf.x12_file_id = i.x12_file_id
+							inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
+							inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
+							inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
+							inner join dbo.x12_837_2400 cp on c.x12_837_2300_id = cp.x12_837_2300_id
+						where 
+							c.x12_837_2300_id = @x12_837_2300_id
+							and g.gs08_version_id_code = '005010X222A1'						--	Professional claim file
+							and cp.L2400_sv101_proc_code_qual is null						--	Not a professional claim
+							and cp.L2400_sv201_service_line_revenue_code is null			--	Not an institutional claim
+							and cp.L2400_sv301_dent_product_or_service_id_qualifier = 'AD'	--	Is a dental claim
+					)
+					begin
+						set @is_dental_claim = 1
+					end
+				end
+				
+				if @debug = 1
+				begin
+					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+					values (
+							7
+						,	'wf_ib_21_837_import - call import new claim'
+						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
+						,	null
+						,	@instance_id
+						,	0
+						,	@error_message	
+						,	@trading_partner_id )
+				end
+
+				--	Professional Claim
+				if @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1', '005010X291' )	--adding pce prof
+					and @is_dental_claim = 0	--	Force dental claims inside a professional claim file to the dental import procedure
+				begin
+					exec @return = dbo.wf_ib_2110_837p_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
+				end
+								
+				--	Institutional Claim	
+				if @x12_version_id_code in ( '004010X096A1','005010X223','005010X223A2','005010X292' )		--adding pce inst
+				begin
+					exec @return = dbo.wf_ib_2120_837i_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
+				end
+
+				--	Dental Claim
+				if @x12_version_id_code in ( '004010X097A1', '005010X224A2' )
+					or @is_dental_claim = 1		--	Force professional claim file dental claim into the dental import.
+				begin
+					exec @return = dbo.wf_ib_2130_837d_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
+				end
+
+				if @debug = 1
+				begin
+					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
+					values (
+							7
+						,	'wf_ib_21_837_import - complete import new claim'
+						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
+						,	null
+						,	@instance_id
+						,	0
+						,	@error_message	
+						,	@trading_partner_id )
+				end
+			end try
+			begin catch
+				-- if we crashed in the above procedure it will likely be in the middle of a transaction.
+				if @@trancount > 0 rollback transaction	
+
+				set @errmsg = 'Error executing ' + isnull(ERROR_PROCEDURE(),'') + ' for the record: x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + isnull(ERROR_MESSAGE(),'') + '  Generated by ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+				exec dbo.x12_error_message
+								@x12_file_id = @x12_file_id,
+								@x12_interchange_id = @x12_interchange_id,
+								@x12_functional_group_id = @x12_functional_group_id,
+								@x12_transaction_id = @x12_transaction_id,
+								@x12_record_id = @x12_837_2300_id,
+								@x12_record_table = 'x12_837_2300',
+								@message_text = @errmsg
+
+				-- mark the claim as an error if it isn't already
+				update dbo.x12_837_2300 set error = 1
+				where x12_837_2300_id = @x12_837_2300_id
+					and error = 0
+
+				return 1
+
+			end catch
+
+			if @return = 1
+			begin
+				set @errmsg = 'An error was encountered while parsing x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
+				exec dbo.x12_error_message
+								@x12_file_id = @x12_file_id,
+								@x12_interchange_id = @x12_interchange_id,
+								@x12_functional_group_id = @x12_functional_group_id,
+								@x12_transaction_id = @x12_transaction_id,
+								@x12_record_id = @x12_837_2300_id,
+								@x12_record_table = 'x12_837_2300',
+								@message_text = @errmsg
+
+				-- mark the claim as an error if it isn't already
+				update dbo.x12_837_2300 set error = 1
+				where x12_837_2300_id = @x12_837_2300_id
+					and error = 0
+
+				return 1
+
+			end
+		end
+
+		if (@is_transactional = 0)
+			goto NEXT_CLAIM
+	end
+
+	--------------------------------------------------
+	--  File Imported
+	--------------------------------------------------
+	if exists (
+		-- we have at least one processed claim
+		select 1
+		from dbo.x12_file f 
+			inner join dbo.x12_interchange i  on f.x12_file_id = i.x12_file_id
+			inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
+			inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
+			inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
+		where 
+			f.x12_file_id = @p_x12_file_id
+			and c.processed = 1	)
+	and not exists (
+		-- we have no claims that are un-processed
+		select 1
+		from dbo.x12_file f 
+			inner join dbo.x12_interchange i  on f.x12_file_id = i.x12_file_id
+			inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
+			inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
+			inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
+		where 
+			f.x12_file_id = @p_x12_file_id
+			and c.processed = 0	)
+	begin
+		update dbo.x12_file set is_imported = 1
+		where x12_file_id = @p_x12_file_id
+	end
+
+	/*
+		US 40374
+		Adding logic to copy the prof/inst conduent inbound file to the data/done directory
+	*/
+	--need to validate trading_partner and trading_partner_file_types
+	if @trading_partner_id in (747,748) and @trading_partner_file_type_id in (4357,4358,4360,4361) --conduent and conduent test
+	begin
+		select @inbound_file_id = x.inbound_file_id
+		from dbo.x12_file x
+		where x.x12_file_id = @p_x12_file_id
+
+		exec dbo.wf_con_90_copy_files @inbound_file_id
+								,	  @trading_partner_id
+								,	  @trading_partner_file_type_id
+	end
+
+	insert into application_log (
+			application_type_id
+		,	program_step
+		,	program_data
+		,	stack_trace
+		,	instance_id
+		,	is_error
+		,	error_message	
+		,	trading_partner_id)
+	values (
+			7
+		,	'wf_ib_21_837_import - Completed.'
+		,	@program_data
+		,	null
+		,	@instance_id
+		,	0
+		,	@error_message	
+		,	null ) --@p_trading_partner_id)
+
+	return (0)
+end
