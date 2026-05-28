@@ -1,1059 +1,170 @@
-SE [Edee]
-GO
-/****** Object:  StoredProcedure [dbo].[wf_ib_21_837_import]    Script Date: 4/13/2026 10:45:49 AM ******/
-SET ANSI_NULLS ON
-GO
-SET QUOTED_IDENTIFIER ON
-GO
-ALTER PROCEDURE [dbo].[wf_ib_21_837_import]
-	@p_x12_file_id [int],
-	@p_x12_interchange_id [int] = null,
-	@p_x12_functional_group_id [int] = null,
-	@p_x12_transaction_id [int] = null,
-	@p_x12_837_2300_id [int] = null,
-	@p_reload_claim [bit] = 0,
-	@instance_id [uniqueidentifier] = null
-with execute as caller
-as
+Subject: Analysis for Story #45385 – Move Claim to Review Queue When Pricing Import Fails
+
+SP Reviewed:
+dbo.wf_ib_21_837_import
+
+Search Text:
+
+-- 45385 -- check repricing_configuration.inprocess_claim_workflow_id against current claim workflow id
+
+This appears to be the safest location to implement the story because it already handles returned repriced claims that are being skipped due to errors and contains the existing #45385 logic.
+
+Story Requirement:
+
+When a claim is returned on an inbound file from a trading partner but pricing cannot be imported because of file/import errors:
+
+1. Move the claim out of the configured In Process queue.
+2. Move the claim to the configured Review queue.
+3. Add a claim comment:
+   "This claim was returned on <filename> but could not be imported due to <error reason>"
+
+Proposed Changes
+
+1. Add Variables
+
+Current:
+
+declare @inprocess_claim_workflow_id int
+, @claim_workflow_id int
+
+Change To:
+
+declare @inprocess_claim_workflow_id int
+, @claim_workflow_id int
+, @review_claim_workflow_id int
+, @claim_id int
+, @claim_comment varchar(max)
+, @trading_partner_filename varchar(255)
+, @error_reason varchar(max)
+
+2. Repricing Configuration Lookup
+
+Current:
+
+select @inprocess_claim_workflow_id = @trading_partner_file_type_id
+from dbo.repricing_configuration (nolock)
+where inbound_trading_partner_file_type_id = @trading_partner_file_type_id
+
+Proposed:
+
+select top 1
+@inprocess_claim_workflow_id = rc.inprocess_claim_workflow_id,
+@review_claim_workflow_id = rc.review_claim_workflow_id
+from dbo.repricing_configuration rc with (nolock)
+where rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id
+
+Need to Verify:
+
+repricing_configuration.inprocess_claim_workflow_id
+repricing_configuration.review_claim_workflow_id
+
+3. Claim Lookup
+
+Current:
+
+select @claim_workflow_id = c.claim_workflow_id
+from dbo.x12_837_2300_REF ref
+inner join mcr_dc_prod.dbo.claim c
+on c.claim_id = ref.L2300_ref02_reference
+where ref.x12_837_2300_id = @x12_837_2300_id
+and ref.L2300_ref01_code = 'F8'
+
+Proposed:
+
+select
+@claim_id = c.claim_id,
+@claim_workflow_id = c.claim_workflow_id
+from dbo.x12_837_2300_REF ref
+inner join mcr_dc_prod.dbo.claim c
+on c.claim_id = convert(int, ref.L2300_ref02_reference)
+where ref.x12_837_2300_id = @x12_837_2300_id
+and ref.L2300_ref01_code = 'F8'
+and isnumeric(ref.L2300_ref02_reference) = 1
+
+4. Replace Existing Skip Block
+
+Current:
+
+if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id,0)
+begin
+update x12_837_2300
+set error = 1,
+processed = 1
+where x12_837_2300_id = @x12_837_2300_id
+
+```
+goto NEXT_CLAIM
+```
+
+end
+
+Proposed:
+
+if @claim_id is not null
+and @claim_workflow_id = @inprocess_claim_workflow_id
+and @review_claim_workflow_id is not null
 begin
 
-/*
-************************************************************************
-Name:			
-Description:	import 837 claim
-Used by:		Repricing Config Team
-Test harness:	Call by wf_ib_process
-		exec wf_ib_21_837_import
-			@p_x12_file_id = 4311284,
-			@p_x12_interchange_id = 4286323,
-			@p_x12_functional_group_id = 4282131,
-			@p_x12_transaction_id =59209329 ,
-			@p_x12_837_2300_id =93088092,
-			@p_reload_claim  = 0,
-			@instance_id = null
-	
-Execution time: every hrs
-Return values:  n/a
-History:
-Created: 
-Created DevOps Story:	
-Modified:		
-	02/09/2023 - PL Wave4 migration. Remove link server SQLReporting due to Object reference it migrate to same SQL instance WTPWSQLAGC01.
-	02/04/2025  39546 PL Claim ID Digit Limit (len expand from 8 - 9)
-	04/09/2025	40374 JEM
-	20260206	45274 JRO - @possible_reworked_claim bug causing @must_be_repriced_claim_reply to not behave correctly
-    03/09/2026          JEM PCE changes
-	04/02/2026          add back goto with wrapper to ignore transactions
-    04/08/2026	45918 PL  - Fix error Claim has already been repriced.  This due to trading partner resend Dup claim.
-	04/13/2026	45385	jm	Automatically Loop through Errored Files Inbound Files
+```
+select @trading_partner_filename = f.trading_partner_filename
+from dbo.x12_file xf
+inner join dbo.inbound_file f
+    on f.inbound_file_id = xf.inbound_file_id
+where xf.x12_file_id = @x12_file_id
+
+set @error_reason = 'file errors'
+
+set @claim_comment =
+    'This claim was returned on '
+    + isnull(@trading_partner_filename,'')
+    + ' but could not be imported due to '
+    + isnull(@error_reason,'unknown error')
+
+update mcr_dc_prod.dbo.claim
+set claim_workflow_id = @review_claim_workflow_id
+where claim_id = @claim_id
+
+-- replace with actual claim comment process
+exec mcr_dc_prod.dbo.claim_comment_insert
+     @claim_id = @claim_id,
+     @comment = @claim_comment
+```
 
-*************************************************************************
-*/
-
-
-
-	SET NOCOUNT ON
-
-
-	--------------------------------------------------
-	--  Error messages during processing
-	--------------------------------------------------
-	declare @errmsg						varchar(max)
-	declare @errcode					varchar(10)
-	declare @return						int
-
-	--------------------------------------------------
-	--  Working variables
-	--------------------------------------------------
-	declare @trading_partner_id			int
-	declare @trading_partner_file_type_id	int
-	declare @inbound_file_id			int
-	declare @x12_file_id				int
-	declare @x12_interchange_id			int
-	declare @x12_functional_group_id	int
-	declare @x12_transaction_id			int
-	declare @x12_837_2300_id			int
-	declare @is_repriced_claim_reply	bit
-	declare @must_be_repriced_claim_reply	bit
-	declare @can_be_repriced_claim_reply	bit
-	declare @possible_reworked_claim	bit
-
-	declare @repricing_claim_history_id	int
-
-	declare @repricing_claim_history_id_F8		int
-	declare @repricing_claim_history_id_D9		int
-	declare @repricing_claim_history_id_9A		int
-
-	declare @2300_REF_F8				varchar(30)	--	our claim id returned by the trading partner
-	declare @2300_REF_D9				varchar(30)	--	our claim id returned by the trading partner
-	declare @2300_REF_9A				varchar(30)	--	our claim id returned by the trading partner
-	
-	declare @2300_REF_F8_current_claim	bit
-	declare @2300_REF_D9_current_claim	bit
-	declare @2300_REF_9A_current_claim	bit
-
-	declare @2300_REF_F8_previous_claim	bit
-	declare @2300_REF_D9_previous_claim	bit
-	declare @2300_REF_9A_previous_claim	bit
-
-	declare @x12_version_id_code		varchar(12)
-	declare @found_error				bit
-	
-	declare @is_transactional bit 
-	set @is_transactional = 0
-
-	--	45385
-	declare @inprocess_claim_workflow_id		int
-		,	@claim_workflow_id					int
-
-	if @p_reload_claim is null set @p_reload_claim = 0
-
-	---------------------------------------------
-	--  Error Messages
-	---------------------------------------------
-	declare @error_message				nvarchar(4000)
-	declare @error_number				int
-	declare @debug						int
-
-	declare @program_data				varchar(max)
-
-	---------------------------------------------
-	--  Start
-	---------------------------------------------
-	set @instance_id = isnull(@instance_id, NEWID())
-	set @return	= 0
-	set @error_number = 0
-	set @debug = 0
-
-	set @program_data = '@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ': 12_file_id = ' + isnull(convert(varchar,@p_x12_file_id),'null')	-- program_data
-
-	insert into application_log (
-			application_type_id
-		,	program_step
-		,	program_data
-		,	stack_trace
-		,	instance_id
-		,	is_error
-		,	error_message	
-		,	trading_partner_id)
-	values (
-			7
-		,	'wf_ib_21_837_import - Start.'
-		,	@program_data
-		,	null
-		,	@instance_id
-		,	0
-		,	@error_message	
-		,	null ) --@p_trading_partner_id)
-
-	select @is_transactional = i.is_transactional
-	  from x12_file x
-		inner join inbound_file i on i.inbound_file_id = x.inbound_file_id
-	  where x.x12_file_id = @p_x12_file_id
-
-
-
-	--------------------------------------------------
-	--  Process each claim we find from our input parms
-	--------------------------------------------------
-NEXT_CLAIM:
-
-	set @x12_837_2300_id = null
-
-	select top 1
-		@trading_partner_id = f.trading_partner_id
-	,	@trading_partner_file_type_id = f.trading_partner_file_type_id
-	,	@x12_file_id = xf.x12_file_id
-	,	@x12_interchange_id = i.x12_interchange_id
-	,	@x12_functional_group_id = g.x12_functional_group_id
-	,	@x12_version_id_code = g.gs08_version_id_code
-	,	@x12_transaction_id = t.x12_transaction_id
-	,	@x12_837_2300_id = c.x12_837_2300_id
-	,	@can_be_repriced_claim_reply = ft.is_repriced_claim_reply
-	,	@must_be_repriced_claim_reply = ft.must_be_repriced_claim_reply
-	from inbound_file f
-		inner join x12_file xf on f.inbound_file_id = xf.inbound_file_id
-		inner join x12_interchange i  on xf.x12_file_id = i.x12_file_id
-		inner join x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
-		inner join x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
-		inner join x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
-		inner join trading_partner_file_type ft on f.trading_partner_file_type_id = ft.trading_partner_file_type_id
-	where 
-		xf.x12_file_id = @p_x12_file_id
-		and ( @p_x12_interchange_id is null or i.x12_interchange_id = @p_x12_interchange_id )
-		and ( @p_x12_functional_group_id is null or g.x12_functional_group_id = @p_x12_functional_group_id )
-		and ( @p_x12_transaction_id is null or t.x12_transaction_id = @p_x12_transaction_id )
-		and ( @p_x12_interchange_id is null or i.x12_interchange_id = @p_x12_interchange_id )
-		and ( @p_x12_837_2300_id is null or c.x12_837_2300_id = @p_x12_837_2300_id )
-		--  only professional, dental, institutional claims
-		--and g.gs08_version_id_code in ( '004010X098A1','004010X097A1','004010X096A1' )
-		and g.gs08_version_id_code in ( '004010X098A1','004010X097A1','004010X096A1','005010X222','005010X222A1','005010X223','005010X223A2','005010X224A2','005010X291','005010X292')
-		--  skipped errors and claims we tagged as processed
-		and c.error = 0
-		and c.processed = 0
-		--  only files ready to import
-		and f.deleted = 0
-		and f.error = 0
-		and xf.deleted = 0
-		and xf.error = 0
-		and xf.is_parsed = 1
-		and xf.is_imported = 0
-
-	--	and f.inbound_file_id = 2932957
-
-	--	and f.trading_partner_id <> 276		--	Park Cigna until I can walk the first files.
-	--	and f.trading_partner_file_type_id not in (1732)	--	CIGNA Inbound Institutional P4P Claims
-	--	and f.trading_partner_file_type_id not in (1733)	--	CIGNA Inbound Professional P4P Claims
-	--	and f.trading_partner_file_type_id in (1732, 1733)	--	CIGNA Inbound P4P Claims
-	--	and f.inbound_file_id = 1644898
-	--	and f.trading_partner_file_type_id not in (3331)	--	Hygieia Wellness Claim File
-
-	--	and f.trading_partner_id <> 537						--	HMS - Healthcare Management Solutions
-
-	--	and f.trading_partner_id <> 589		--	Hold BCBSFL files until we find the "replayed" one...walk each one through parsing but not importing.
-
-	--	and f.trading_partner_id = 99		--	Hold Aetna round trip so I can see if the external edits for Stewardship are working.
-
-	--	and f.trading_partner_id <> 99		--	Hold Aetna round trip so I can see if the new repricing flag lookup works.
-
-	--	and f.trading_partner_id <> 683		--	Mercy	Mercy Benefit Administrators
-
-	order by
-		i.x12_interchange_id
-	,	g.x12_functional_group_id
-	,	t.x12_transaction_id
-	,	c.x12_837_2300_id
-
-	if @debug = 1
-	begin
-		insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-		values (
-				7
-			,	'wf_ib_21_837_import - process claim.'
-			,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
-			,	null
-			,	@instance_id
-			,	0
-			,	@error_message	
-			,	@trading_partner_id )
-	end
-
-	if @debug = 1
-	begin
-		insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-		values (
-				7
-			,	'wf_ib_21_837_import - Verify batchjoblookup DB.'
-			,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
-			,	null
-			,	@instance_id
-			,	0
-			,	@error_message	
-			,	@trading_partner_id )
-	end
-	--------------------------------------------------
-	--  Verify lookup database is available before processing files
-	--------------------------------------------------
-	if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
-	begin
-		print 'Batch job lookup database is unavailable...ending imports'
-		return (0)
-	end
-
-	--------------------------------------------------
-	--	Reset locals for each claim
-	--------------------------------------------------
-	set @is_repriced_claim_reply = 0
-	set @possible_reworked_claim = 0
-
-	set @repricing_claim_history_id = null
-
-	set @repricing_claim_history_id_F8 = null
-	set @repricing_claim_history_id_D9 = null
-	set @repricing_claim_history_id_9A = null
-
-	set @2300_REF_F8 = null
-	set @2300_REF_D9 = null
-	set @2300_REF_9A = null
-
-	set @2300_REF_F8_current_claim = 0
-	set @2300_REF_D9_current_claim = 0
-	set @2300_REF_9A_current_claim = 0
-
-	set @2300_REF_F8_previous_claim = 0
-	set @2300_REF_D9_previous_claim = 0
-	set @2300_REF_9A_previous_claim = 0
-
-	--------------------------------------------------
-	--  Import Claim
-	--------------------------------------------------
-	if @x12_837_2300_id is not null
-	begin
-		if @debug = 1
-		begin
-			insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-			values (
-					7
-				,	'wf_ib_21_837_import - start import'
-				,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
-				,	null
-				,	@instance_id
-				,	0
-				,	@error_message	
-				,	@trading_partner_id )
-		end
-if @debug = 1
-		begin
-			insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-			values (
-					7
-				,	'wf_ib_21_837_import - before repriced claim reply check.'
-				,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
-				,	null
-				,	@instance_id
-				,	0
-				,	@error_message	
-				,	@trading_partner_id )
-		end
-		--------------------------------------------------
-		--	Did we send this claim out for repricing?
-		--------------------------------------------------
-		if @can_be_repriced_claim_reply = 1
-		begin
-			if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - start repriced claim reply.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-			--------------------------------------------------
-			--	Search the known locations for our claim_id
-			--------------------------------------------------	
-			select @2300_REF_F8 = r.L2300_ref02_reference
-			from dbo.x12_837_2300_REF r 
-			where x12_837_2300_id = @x12_837_2300_id
-				and L2300_ref01_code = 'F8'
-
-			select @2300_REF_D9 = r.L2300_ref02_reference
-			from dbo.x12_837_2300_REF r 
-			where x12_837_2300_id = @x12_837_2300_id
-				and L2300_ref01_code = 'D9'
-
-			select @2300_REF_9A = r.L2300_ref02_reference
-			from dbo.x12_837_2300_REF r 
-			where x12_837_2300_id = @x12_837_2300_id
-				and L2300_ref01_code = '9A'
-						
-			--if len(@2300_REF_F8) <> 8 or isnumeric(@2300_REF_F8) = 0			
-			if len(@2300_REF_F8) not in (8,9) or isnumeric(@2300_REF_F8) = 0  ----39546
-				set @2300_REF_F8 = null
-
-			--if len(@2300_REF_D9) <> 8 or isnumeric(@2300_REF_D9) = 0
-			if len(@2300_REF_D9) not in (8,9) or isnumeric(@2300_REF_D9) = 0  ----39546
-				set @2300_REF_D9 = null
-
-			--if len(@2300_REF_9A) <> 8 or isnumeric(@2300_REF_9A) = 0
-			if len(@2300_REF_9A) not in (8,9) or isnumeric(@2300_REF_9A) = 0  ----39546
-				set @2300_REF_9A = null
-
-
-			if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - searched for claim_id in REF.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-
-			if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - search repricing claim history for claim_id F8.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-			--------------------------------------------------
-			--	Are we waiting for one of the possible claim numbers to come back with pricing?
-			--	1. Check to see if we're waiting for a claim from this vendor.
-			--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
-			--------------------------------------------------
-			if @2300_REF_F8 is not null
-			begin
-
-				--	1. Check to see if we're waiting for a claim from this vendor.
-				select top 1 @repricing_claim_history_id_F8 = h.repricing_claim_history_id
-				from dbo.repricing_claim_history h 
-					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-				where h.deleted = 0 
-					and h.outbound_file_id is not null 
-					and h.inbound_file_id is null		--	waiting for pricing data
-					and h.claim_id = convert(int,@2300_REF_F8)
-					and datediff(month,h.created_date,getdate()) < 12 
-					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-					and ft.trading_partner_id = @trading_partner_id
-				order by h.repricing_claim_history_id desc
-				
-				if @repricing_claim_history_id_F8 is not null
-				begin
-					set @2300_REF_F8_current_claim = 1
-				end
-
-				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
-				if @2300_REF_F8_current_claim = 0
-					and exists (
-					select 1 
-					from dbo.repricing_claim_history h 
-						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-					where h.deleted = 0 
-						and h.outbound_file_id is not null 
-						and h.inbound_file_id is not null	--	no longer waiting for pricing data
-						and h.claim_id = convert(int,@2300_REF_F8)
-						and datediff(month,h.created_date,getdate()) < 12 
-						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-						and ft.trading_partner_id = @trading_partner_id
-				)
-				begin
-					set @2300_REF_F8_previous_claim = 1
-				end
-
-			end
-
-			if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - search repricing claim history for claim_id D9.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_D9 : ' + isnull(convert(varchar,@2300_REF_D9), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-
-			if @2300_REF_D9 is not null
-			begin
-				--	1. Check to see if we're waiting for a claim from this vendor.
-				select top 1 @repricing_claim_history_id_D9 = h.repricing_claim_history_id
-				from dbo.repricing_claim_history h 
-					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-				where h.deleted = 0 
-					and h.outbound_file_id is not null 
-					and h.inbound_file_id is null		--	waiting for pricing data
-					and h.claim_id = convert(int,@2300_REF_D9)
-					and datediff(month,h.created_date,getdate()) < 12 
-					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-					and ft.trading_partner_id = @trading_partner_id
-				order by h.repricing_claim_history_id desc
-
-				if @repricing_claim_history_id_D9 is not null
-				begin
-					set @2300_REF_D9_current_claim = 1
-				end
-
-				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
-				if @2300_REF_D9_current_claim = 0
-					and exists (
-					select 1 
-					from dbo.repricing_claim_history h 
-						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-					where h.deleted = 0 
-						and h.outbound_file_id is not null 
-						and h.inbound_file_id is not null	--	no longer waiting for pricing data
-						and h.claim_id = convert(int,@2300_REF_D9)
-						and datediff(month,h.created_date,getdate()) < 12 
-						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-						and ft.trading_partner_id = @trading_partner_id
-				)
-				begin
-					set @2300_REF_D9_previous_claim = 1
-				end
-			end
-
-			if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - search repricing claim history for claim_id 9A.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_9A : ' + isnull(convert(varchar,@2300_REF_9A), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-
-			if @2300_REF_9A is not null
-			begin
-
-				--	1. Check to see if we're waiting for a claim from this vendor.
-				select top 1 @repricing_claim_history_id_9A = h.repricing_claim_history_id
-				from dbo.repricing_claim_history h 
-					inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-					inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-				where h.deleted = 0 
-					and h.outbound_file_id is not null 
-					and h.inbound_file_id is null		--	waiting for pricing data
-					and h.claim_id = convert(int,@2300_REF_9A)
-					and datediff(month,h.created_date,getdate()) < 12 
-					and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-					--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-				--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-					and ft.trading_partner_id = @trading_partner_id
-				order by h.repricing_claim_history_id desc
-
-				if @repricing_claim_history_id_9A is not null
-				begin
-					set @2300_REF_9A_current_claim = 1
-				end
-
-				--	2. Check to see if we've recently received the claim from this vendor...perhaps they accidentally sent it twice (it happens).
-				if @2300_REF_9A_current_claim = 0
-					and exists (
-					select 1 
-					from dbo.repricing_claim_history h 
-						inner join dbo.repricing_configuration rc on h.repricing_configuration_id = rc.repricing_configuration_id
-						inner join dbo.trading_partner_file_type ft on rc.inbound_trading_partner_file_type_id = ft.trading_partner_file_type_id
-					where h.deleted = 0 
-						and h.outbound_file_id is not null 
-						and h.inbound_file_id is not null	--	no longer waiting for pricing data
-						and h.claim_id = convert(int,@2300_REF_9A)
-						and datediff(month,h.created_date,getdate()) < 12 
-						and h.outbound_repricing_methodology_id not in (9)		--	One-way claim history records sent for purposes other than repricing.
-
-						--	01/17/2019 11:13am		Sharon and I decided we needed to tighten this up.  Payer Compass sent us the same claim round trip twice...but the claim was out at Aetna...so P.C. stole the Aetna repricing_claim_history record but should have errored.
-					--	and rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id		--	too tight...the claim can drop through one or more tiers at the vendor and come back on a different file type
-						and ft.trading_partner_id = @trading_partner_id
-				)
-				begin
-					set @2300_REF_9A_previous_claim = 1
-				end
-			end
-if @debug = 1
-			begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-				values (
-						7
-					,	'wf_ib_21_837_import - stop - search repricing_claim_history for claim_id.'
-					,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@2300_REF_F8 : ' + isnull(convert(varchar,@2300_REF_F8), 'null')	-- program_data
-					,	null
-					,	@instance_id
-					,	0
-					,	@error_message	
-					,	@trading_partner_id )
-			end
-			--------------------------------------------------
-			--	Did we find a good claim number for which we're awaiting pricing information?
-			--------------------------------------------------
-			set @repricing_claim_history_id = null
-
-			if @2300_REF_F8_current_claim = 1
-			begin
-				set @repricing_claim_history_id = @repricing_claim_history_id_F8
-			end
-			else if @2300_REF_D9_current_claim = 1
-			begin
-				set @repricing_claim_history_id = @repricing_claim_history_id_D9
-			end
-			else if @2300_REF_9A_current_claim = 1
-			begin
-				set @repricing_claim_history_id = @repricing_claim_history_id_9A
-			end
-
-			set @is_repriced_claim_reply = 0
-
-			if @repricing_claim_history_id is not null
-				set @is_repriced_claim_reply = 1
-
-			--	If we're not waiting on the claim, have we ever sent it out?  Sometimes a vendor may accidentally send us a round trip priced claim twice by error.
-			if @repricing_claim_history_id is null
-			begin
-				if @2300_REF_F8_previous_claim = 1
-					or @2300_REF_D9_previous_claim = 1
-					or @2300_REF_9A_previous_claim = 1
-				begin
-					-----------------------------------------------
-					--	Our re-priced claim but we're no longer expecting a reply.  Perhaps the vendor is sending us updated pricing.
-					--	Does this appear to be a reworked claim?  Test every way that we can receive a "reworked" or "adjusted" claim.
-					-----------------------------------------------
-					if @possible_reworked_claim = 0 and exists (
-						select 1
-						from dbo.x12_837_2300 c
-						where c.x12_837_2300_id = @x12_837_2300_id
-							and c.L2300_hcp01_pricing_methodology = '14'	--	Adjustment
-					)
-					begin
-						set @possible_reworked_claim = 1
-					end
-
-					if @possible_reworked_claim = 0 and exists (
-						select 1
-						from x12_837_2300 c
-						--left join x12_837_2300_REF r on c.x12_837_2300_id = r.x12_837_2300_id and L2300_ref01_code = '9C'	--45274
-						inner join x12_837_2300_REF r on c.x12_837_2300_id = r.x12_837_2300_id and L2300_ref01_code = '9C'	--45274
-						where c.x12_837_2300_id = @x12_837_2300_id
-					)
-					begin
-						set @possible_reworked_claim = 1
-					end
-
-					-----------------------------------------------
-					--	This trading partner file type MUST be a round-trip repriced claim.
-					--	If it isn't, and it's not a reworked claim, blow up the claim and the file.
-					--	Abort processing the file and review what the heck is going on here.
-					-----------------------------------------------
-					if @is_repriced_claim_reply = 0 
-						and @possible_reworked_claim = 0 
-					begin
-						-- Begin 45918
-						--	45385	-	Phan, Jim & I talked. Modify below code to not only look at Medica claims 
-						IF EXISTS (SELECT 1 
-										FROM dbo.x12_837_2300_REF ref 
-										INNER JOIN mcr_dc_prod.dbo.claim ci on ci.claim_id = ref.L2300_ref02_reference
-										WHERE ref.x12_837_2300_id = @x12_837_2300_id
-										  AND ref.L2300_ref01_code = 'F8'
-										  AND ISNUMERIC(ref.L2300_ref02_reference) = 1
-									 )
-							-- Bypass dup claim
-							--	45385	--	check repricing_configuration.inprocess_claim_workflow_id against current claim workflow id
-							begin
-
-								set @inprocess_claim_workflow_id = null
-								set @claim_workflow_id = null
-
-								-- doing this here, for the 1 to 35+ claims in the file, rather than every inbound file
-								select @inprocess_claim_workflow_id = @trading_partner_file_type_id
-								from dbo.repricing_configuration (nolock)
-								where inbound_trading_partner_file_type_id = @trading_partner_file_type_id
-
-								select @claim_workflow_id = c.claim_workflow_id
-								from dbo.x12_837_2300_REF ref 
-								inner join mcr_dc_prod.dbo.claim c on c.claim_id = ref.L2300_ref02_reference
-								WHERE ref.x12_837_2300_id = @x12_837_2300_id
-									AND ref.L2300_ref01_code = 'F8'
-									AND ISNUMERIC(ref.L2300_ref02_reference) = 1
-
-								if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
-								begin
-									update x12_837_2300 set error = 1, processed = 1 WHERE x12_837_2300_id = @x12_837_2300_id --and error = 0
-									GOTO NEXT_CLAIM
-								end
-							end
-						--End 45918
-						ELSE
-							BEGIN
-								--	This claim has already been priced by the vendor and we're not expecting "reworked" claims from this vendor.
-								set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  We have received re-priced claim data but this claim has already been re-priced.  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-								exec x12_error_message
-												@x12_file_id = @x12_file_id,
-												@x12_interchange_id = @x12_interchange_id,
-												@x12_functional_group_id = @x12_functional_group_id,
-												@x12_transaction_id = @x12_transaction_id,
-												@x12_record_id = @x12_837_2300_id,
-												@x12_record_table = 'x12_837_2300',
-												@message_text = @errmsg
-
-								-- mark the claim as an error if it isn't already
-								update x12_837_2300 set error = 1
-								where x12_837_2300_id = @x12_837_2300_id
-									and error = 0
-
-								-- stop processing this file
-								--return 1			--	45385
-								if (@is_transactional = 0)
-									goto NEXT_CLAIM
-								else
-									return 1
-                            END
-							--	END -- 45385
-					end
-				end
-			end
-		end	
-		
---		if @2300_REF_F8 = '15331232' set @is_repriced_claim_reply = 0		--	Fluke where a one-way CareVue claim exactly matched a round trip MultiPlan claim
-		
-
-		--------------------------------------------------
-		--	Is this partner ONLY doing round trip claims on the pipe?
-		--	If so this MUST have a repricing claim history record.
-		--	No one-way claims allowed on a pipe that is slated for round-trip only.
-		--	If this an adjusted or reworked claim, we'll load it as a net-new claim from the vendor.
-		--------------------------------------------------
-		if @must_be_repriced_claim_reply = 1 
-			and @is_repriced_claim_reply = 0 
-			and @possible_reworked_claim = 0
-		--	and @x12_file_id <> 205586		--	 I manually pushed this one through on 06/14/2018
-		begin	
-			--------------------------------------------------
-			--  We not should get "direct" claims in a round trip file unless they're reworks.
-			--------------------------------------------------
-			set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  We have received a claim for a trading partner that MUST be re-priced, but we cant locate the claim_id.  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-			exec dbo.x12_error_message
-							@x12_file_id = @x12_file_id,
-							@x12_interchange_id = @x12_interchange_id,
-							@x12_functional_group_id = @x12_functional_group_id,
-							@x12_transaction_id = @x12_transaction_id,
-							@x12_record_id = @x12_837_2300_id,
-							@x12_record_table = 'x12_837_2300',
-							@message_text = @errmsg
-
-			-- mark the claim as an error if it isn't already
-			update dbo.x12_837_2300 set error = 1
-			where x12_837_2300_id = @x12_837_2300_id
-				and error = 0
-
-			-- stop processing this file
-			return 1	
-
-		end
-		
-		--------------------------------------------------
-		--  Repriced Claims -- We sent them out and now they're back
-		--------------------------------------------------
-		if @is_repriced_claim_reply = 1
-		--	and @x12_file_id <> 205586		--	 I manually pushed this one through on 06/14/2018
-		begin
-			begin try
-				-- try to import the claim
-				--------------------------------------------------
-				--  Verify lookup database is available before processing the claim
-				--------------------------------------------------
-				if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
-				begin
-					print 'Batch job lookup database is unavailable...ending imports'
-					return (0)
-				end
-				
-				if @debug = 1
-				begin
-				insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-					values (
-							7
-						,	'wf_ib_21_837_import - call repriced reply import claim'
-						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
-						,	null
-						,	@instance_id
-						,	0
-						,	@error_message	
-						,	@trading_partner_id )
-				end
-
-				--if @x12_version_id_code = '004010X098A1'
-				if @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1' )
-					exec @return = dbo.wf_ib_2140_837p_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
-									
-				--if @x12_version_id_code = '004010X096A1'
-				if @x12_version_id_code in ( '004010X096A1','005010X223','005010X223A2' )
-					exec @return = dbo.wf_ib_2150_837i_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
-
-				--if @x12_version_id_code = '004010X097A1'
-				if @x12_version_id_code in ( '004010X097A1', '005010X224A2' )
-					exec @return = dbo.wf_ib_2160_837d_import_repriced_claim_reply @x12_837_2300_id, @repricing_claim_history_id, @instance_id
-
-				if @debug = 1
-				begin
-					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-					values (
-							7
-						,	'wf_ib_21_837_import - complete repriced reply import claim'
-						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
-						,	null
-						,	@instance_id
-						,	0
-						,	@error_message	
-						,	@trading_partner_id )
-				end
-			end try
-			begin catch
-				-- if we crashed in the above procedure it will likely be in the middle of a transaction.
-				--if @@trancount > 0 rollback transaction			--	45385
-
-				set @errmsg = 'Error executing ' + isnull(ERROR_PROCEDURE(),'') + ' for the record: x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + isnull(ERROR_MESSAGE(),'') + '  Generated by ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-				exec dbo.x12_error_message
-								@x12_file_id = @x12_file_id,
-								@x12_interchange_id = @x12_interchange_id,
-								@x12_functional_group_id = @x12_functional_group_id,
-								@x12_transaction_id = @x12_transaction_id,
-								@x12_record_id = @x12_837_2300_id,
-								@x12_record_table = 'x12_837_2300',
-								@message_text = @errmsg
-
-				-- mark the claim as an error if it isn't already
-				update dbo.x12_837_2300 set error = 1
-				where x12_837_2300_id = @x12_837_2300_id
-					and error = 0
-
-				return 1	
-
-			end catch
-
-			if @return = 1
-			begin
-				set @errmsg = 'An error was encountered while parsing repriced claim x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-				exec dbo.x12_error_message
-								@x12_file_id = @x12_file_id,
-								@x12_interchange_id = @x12_interchange_id,
-								@x12_functional_group_id = @x12_functional_group_id,
-								@x12_transaction_id = @x12_transaction_id,
-								@x12_record_id = @x12_837_2300_id,
-								@x12_record_table = 'x12_837_2300',
-								@message_text = @errmsg
-
-				-- mark the claim as an error if it isn't already
-				update dbo.x12_837_2300 set error = 1
-				where x12_837_2300_id = @x12_837_2300_id
-					and error = 0
-
-				return 1
-
-			end			
-		end
-
-		--------------------------------------------------
-		--  Direct one-way claim or a reworked round-trip claim.
-		--------------------------------------------------
-		if @is_repriced_claim_reply = 0
-		begin
-			begin try
-				-- try to import the claim
-				--------------------------------------------------
-				--  Verify lookup database is available before processing the claim
-				--------------------------------------------------
-				if exists (select 1 from batchjoblookup.dbo.sync_activity where is_synchronizing = 1)
-				begin
-					print 'Batch job lookup database is unavailable...ending imports'
-					return (0)
-				end
-
-				--	Sometimes we can get a dental claim in a professional claim file.
-				declare @is_dental_claim				bit
-
-				set @is_dental_claim = 0
-
-				if @trading_partner_id in (
-					449		--	Payer Compass
-					)
-					and @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1' )		--	Professional claim file
-				begin
-					if exists (	
-						select 1
-						--	select cp.L2400_sv101_proc_code_qual, cp.L2400_sv201_service_line_revenue_code, cp.L2400_sv301_dent_product_or_service_id_qualifier, c.x12_837_2300_id, *
-						from
-							dbo.trading_partner tp 
-							inner join dbo.inbound_file f  on tp.trading_partner_id = f.trading_partner_id
-							inner join dbo.x12_file xf  on f.inbound_file_id = xf.inbound_file_id
-							inner join dbo.x12_interchange i  on xf.x12_file_id = i.x12_file_id
-							inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
-							inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
-							inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
-							inner join dbo.x12_837_2400 cp on c.x12_837_2300_id = cp.x12_837_2300_id
-						where 
-							c.x12_837_2300_id = @x12_837_2300_id
-							and g.gs08_version_id_code = '005010X222A1'						--	Professional claim file
-							and cp.L2400_sv101_proc_code_qual is null						--	Not a professional claim
-							and cp.L2400_sv201_service_line_revenue_code is null			--	Not an institutional claim
-							and cp.L2400_sv301_dent_product_or_service_id_qualifier = 'AD'	--	Is a dental claim
-					)
-					begin
-						set @is_dental_claim = 1
-					end
-				end
-				
-				if @debug = 1
-				begin
-					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-					values (
-							7
-						,	'wf_ib_21_837_import - call import new claim'
-						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
-						,	null
-						,	@instance_id
-						,	0
-						,	@error_message	
-						,	@trading_partner_id )
-				end
-
-				--	Professional Claim
-				if @x12_version_id_code in ( '004010X098A1', '005010X222', '005010X222A1', '005010X291' )	--adding pce prof
-					and @is_dental_claim = 0	--	Force dental claims inside a professional claim file to the dental import procedure
-				begin
-					exec @return = dbo.wf_ib_2110_837p_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
-				end
-								
-				--	Institutional Claim	
-				if @x12_version_id_code in ( '004010X096A1','005010X223','005010X223A2','005010X292' )		--adding pce inst
-				begin
-					exec @return = dbo.wf_ib_2120_837i_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
-				end
-
-				--	Dental Claim
-				if @x12_version_id_code in ( '004010X097A1', '005010X224A2' )
-					or @is_dental_claim = 1		--	Force professional claim file dental claim into the dental import.
-				begin
-					exec @return = dbo.wf_ib_2130_837d_import_claim @x12_837_2300_id, @p_reload_claim, @instance_id
-				end
-
-				if @debug = 1
-				begin
-					insert into dbo.application_log (application_type_id, program_step, program_data, stack_trace, instance_id, is_error, error_message, trading_partner_id)
-					values (
-							7
-						,	'wf_ib_21_837_import - complete import new claim'
-						,	'@x12_837_2300_id : ' + isnull(convert(varchar,@x12_837_2300_id), 'null') + ' : ' + '@x12_version_id_code : ' + isnull(convert(varchar,@x12_version_id_code), 'null')	-- program_data
-						,	null
-						,	@instance_id
-						,	0
-						,	@error_message	
-						,	@trading_partner_id )
-				end
-			end try
-			begin catch
-				-- if we crashed in the above procedure it will likely be in the middle of a transaction.
-				if @@trancount > 0 rollback transaction	
-
-				set @errmsg = 'Error executing ' + isnull(ERROR_PROCEDURE(),'') + ' for the record: x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + isnull(ERROR_MESSAGE(),'') + '  Generated by ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-				exec dbo.x12_error_message
-								@x12_file_id = @x12_file_id,
-								@x12_interchange_id = @x12_interchange_id,
-								@x12_functional_group_id = @x12_functional_group_id,
-								@x12_transaction_id = @x12_transaction_id,
-								@x12_record_id = @x12_837_2300_id,
-								@x12_record_table = 'x12_837_2300',
-								@message_text = @errmsg
-
-				-- mark the claim as an error if it isn't already
-				update dbo.x12_837_2300 set error = 1
-				where x12_837_2300_id = @x12_837_2300_id
-					and error = 0
-
-				return 1
-
-			end catch
-
-			if @return = 1
-			begin
-				set @errmsg = 'An error was encountered while parsing x12_837_2300_id = [' + isnull(convert(varchar,@x12_837_2300_id),'null') + '].  ' + DB_NAME() + '.' + OBJECT_NAME(@@PROCID) + '.'
-				exec dbo.x12_error_message
-								@x12_file_id = @x12_file_id,
-								@x12_interchange_id = @x12_interchange_id,
-								@x12_functional_group_id = @x12_functional_group_id,
-								@x12_transaction_id = @x12_transaction_id,
-								@x12_record_id = @x12_837_2300_id,
-								@x12_record_table = 'x12_837_2300',
-								@message_text = @errmsg
-
-				-- mark the claim as an error if it isn't already
-				update dbo.x12_837_2300 set error = 1
-				where x12_837_2300_id = @x12_837_2300_id
-					and error = 0
-
-				return 1
-
-			end
-		end
-
-		if (@is_transactional = 0)
-			goto NEXT_CLAIM
-	end
-
-	--------------------------------------------------
-	--  File Imported
-	--------------------------------------------------
-	if exists (
-		-- we have at least one processed claim
-		select 1
-		from dbo.x12_file f 
-			inner join dbo.x12_interchange i  on f.x12_file_id = i.x12_file_id
-			inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
-			inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
-			inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
-		where 
-			f.x12_file_id = @p_x12_file_id
-			and c.processed = 1	)
-	and not exists (
-		-- we have no claims that are un-processed
-		select 1
-		from dbo.x12_file f 
-			inner join dbo.x12_interchange i  on f.x12_file_id = i.x12_file_id
-			inner join dbo.x12_functional_group g  on g.x12_interchange_id = i.x12_interchange_id
-			inner join dbo.x12_transaction t  on t.x12_functional_group_id = g.x12_functional_group_id
-			inner join dbo.x12_837_2300 c  on t.x12_transaction_id = c.x12_transaction_id
-		where 
-			f.x12_file_id = @p_x12_file_id
-			and c.processed = 0	)
-	begin
-		update dbo.x12_file set is_imported = 1
-		where x12_file_id = @p_x12_file_id
-	end
-
-	/*
-		US 40374
-		Adding logic to copy the prof/inst conduent inbound file to the data/done directory
-	*/
-	--need to validate trading_partner and trading_partner_file_types
-	if @trading_partner_id in (747,748) and @trading_partner_file_type_id in (4357,4358,4360,4361) --conduent and conduent test
-	begin
-		select @inbound_file_id = x.inbound_file_id
-		from dbo.x12_file x
-		where x.x12_file_id = @p_x12_file_id
-
-		exec dbo.wf_con_90_copy_files @inbound_file_id
-								,	  @trading_partner_id
-								,	  @trading_partner_file_type_id
-	end
-
-	insert into application_log (
-			application_type_id
-		,	program_step
-		,	program_data
-		,	stack_trace
-		,	instance_id
-		,	is_error
-		,	error_message	
-		,	trading_partner_id)
-	values (
-			7
-		,	'wf_ib_21_837_import - Completed.'
-		,	@program_data
-		,	null
-		,	@instance_id
-		,	0
-		,	@error_message	
-		,	null ) --@p_trading_partner_id)
-
-	return (0)
 end
+
+update dbo.x12_837_2300
+set error = 1,
+processed = 1
+where x12_837_2300_id = @x12_837_2300_id
+
+goto NEXT_CLAIM
+
+Items To Verify Before Coding
+
+1. Repricing Configuration
+
+   * Does repricing_configuration contain:
+
+     * inprocess_claim_workflow_id
+     * review_claim_workflow_id
+
+2. Inbound File
+
+   * What is the actual filename column?
+   * trading_partner_filename may be incorrect.
+
+3. Claim Comments
+
+   * What table/SP is currently used for claim comments?
+   * claim_comment_insert is only a placeholder.
+
+4. Error Reason
+
+   * Where is the actual import/file error stored?
+   * Search:
+
+     * x12_error_message
+     * message_text
+     * error_message
+
+Goal is to use the actual error text in the claim comment rather than the placeholder "file errors".
