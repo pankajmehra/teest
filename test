@@ -22,11 +22,11 @@ Stored Procedure:
 
 dbo.wf_ib_21_837_import
 
-Search for:
+SEARCH FOR THIS EXACT TEXT:
 
 – 45385 – check repricing_configuration.inprocess_claim_workflow_id against current claim workflow id
 
-You should find logic similar to:
+You should find a block similar to:
 
 select @claim_workflow_id = c.claim_workflow_id
 from dbo.x12_837_2300_REF ref
@@ -48,34 +48,25 @@ end
 
 THIS IS THE SECTION TO MODIFY.
 
-The new logic should be added immediately before the existing:
-
-update x12_837_2300
-set error = 1,
-processed = 1
-where x12_837_2300_id = @x12_837_2300_id
-
-goto NEXT_CLAIM
-
 VERIFIED DATABASE STRUCTURES
 
-repricing_configuration contains:
+repricing_configuration
 
 * inbound_trading_partner_file_type_id
 * in_process_claim_workflow_type_id
 * review_claim_workflow_type_id
 
-claim contains:
+claim
 
 * claim_id
 * claim_workflow_id
 
-claim_workflow contains:
+claim_workflow
 
 * claim_workflow_id
 * claim_workflow_type_id
 
-claim_comment contains:
+claim_comment
 
 * claim_id
 * comment
@@ -89,14 +80,16 @@ claim_comment contains:
 
 VARIABLES TO ADD
 
-declare @review_claim_workflow_type_id int
+declare @inprocess_claim_workflow_type_id int
+, @review_claim_workflow_type_id int
+, @inprocess_claim_workflow_id int
 , @review_claim_workflow_id int
 , @claim_id int
 , @claim_comment varchar(max)
 
 PROPOSED LOGIC
 
-1. Identify the returned claim using the F8 reference:
+1. Identify the returned claim using the F8 reference.
 
 select
 @claim_id = c.claim_id
@@ -108,15 +101,24 @@ where ref.x12_837_2300_id = @x12_837_2300_id
 and ref.L2300_ref01_code = ‘F8’
 and isnumeric(ref.L2300_ref02_reference) = 1
 
-2. Get review workflow type from repricing configuration:
+2. Get workflow types from repricing configuration.
 
 select top 1
-@review_claim_workflow_type_id = rc.review_claim_workflow_type_id
+@inprocess_claim_workflow_type_id = rc.in_process_claim_workflow_type_id
+, @review_claim_workflow_type_id = rc.review_claim_workflow_type_id
 from dbo.repricing_configuration rc with (nolock)
 where rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id
 and rc.deleted = 0
 
-3. Translate workflow type to actual workflow id:
+3. Translate In Process workflow type to actual workflow id.
+
+select top 1
+@inprocess_claim_workflow_id = cw.claim_workflow_id
+from mcr_dc_prod.dbo.claim_workflow cw with (nolock)
+where cw.claim_workflow_type_id = @inprocess_claim_workflow_type_id
+order by cw.sequence_number
+
+4. Translate Review workflow type to actual workflow id.
 
 select top 1
 @review_claim_workflow_id = cw.claim_workflow_id
@@ -124,9 +126,10 @@ from mcr_dc_prod.dbo.claim_workflow cw with (nolock)
 where cw.claim_workflow_type_id = @review_claim_workflow_type_id
 order by cw.sequence_number
 
-4. Route claim and add comment:
+5. Only move the claim if it is currently sitting in the configured In Process workflow.
 
 if @claim_id is not null
+and @claim_workflow_id = @inprocess_claim_workflow_id
 and @review_claim_workflow_id is not null
 begin
 
@@ -167,7 +170,7 @@ values
 
 end
 
-5. Continue existing processing:
+6. Continue existing processing exactly as today.
 
 update dbo.x12_837_2300
 set error = 1,
@@ -179,19 +182,22 @@ goto NEXT_CLAIM
 IMPLEMENTATION FLOW
 
 1. Returned claim identified from F8 reference.
-2. Review workflow type pulled from repricing_configuration.
-3. Workflow type translated to claim_workflow_id using claim_workflow.
-4. claim.claim_workflow_id updated.
-5. Comment inserted into claim_comment.
-6. Existing x12_837_2300 error/processed logic continues unchanged.
-7. Processing continues to NEXT_CLAIM.
+2. In Process workflow type pulled from repricing_configuration.
+3. Review workflow type pulled from repricing_configuration.
+4. Workflow types translated to actual claim_workflow_id values using claim_workflow.
+5. Verify claim is currently in the configured In Process workflow.
+6. Update claim.claim_workflow_id to Review workflow.
+7. Insert comment into claim_comment.
+8. Continue existing x12_837_2300 error/processed logic unchanged.
+9. Continue processing via NEXT_CLAIM.
 
-ASSUMPTIONS STILL TO VERIFY
+REMAINING ITEMS TO VERIFY
 
 1. Exact column containing inbound trading partner filename.
 2. Source of actual import error text.
 3. Correct created_user_id / modified_user_id values.
 4. Whether claim_comment_type_id should be populated.
-5. Whether the story requires validation that the claim is currently in the configured In Process workflow before routing to Review.
+
+ASSUMPTION
 
 This solution assumes direct updates to mcr_dc_prod.dbo.claim are acceptable and no workflow-routing stored procedure is required.
