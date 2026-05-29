@@ -1,3 +1,55 @@
+
+
+-- New Story 45385 logic
+-- Move claim from configured in-process queue to configured review queue
+if @claim_id is not null
+   and @claim_workflow_id = @inprocess_claim_workflow_id
+   and @review_claim_workflow_id is not null
+begin
+    update mcr_dc_prod.dbo.claim
+    set claim_workflow_id = @review_claim_workflow_id,
+        date_modified = getdate(),
+        os_user_name = suser_sname()
+    where claim_id = @claim_id
+
+    insert into mcr_dc_prod.dbo.claim_comment
+    (
+          claim_id
+        , comment
+        , active
+        , created_date
+        , created_user_id
+        , modified_date
+        , modified_user_id
+        , deleted
+        , claim_comment_type_id
+    )
+    values
+    (
+          @claim_id
+        , @claim_comment
+        , 1
+        , getdate()
+        , 0
+        , getdate()
+        , 0
+        , 0
+        , null
+    )
+end
+
+-- Existing logic - leave as-is
+if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
+begin
+    update dbo.x12_837_2300
+    set error = 1,
+        processed = 1
+    where x12_837_2300_id = @x12_837_2300_id
+
+    goto NEXT_CLAIM
+end
+
+
 Subject: Story 45385 – Exact Search Terms and Change Locations
 
 SP to modify:
