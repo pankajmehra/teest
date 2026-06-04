@@ -1,241 +1,478 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[Usp_adj_l10_line_level_deny_external]    Script Date: 6/4/2026 8:46:47 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
 
 
--- New Story 45385 logic
--- Move claim from configured in-process queue to configured review queue
-if @claim_id is not null
-   and @claim_workflow_id = @inprocess_claim_workflow_id
-   and @review_claim_workflow_id is not null
-begin
-    update mcr_dc_prod.dbo.claim
-    set claim_workflow_id = @review_claim_workflow_id,
-        date_modified = getdate(),
-        os_user_name = suser_sname()
-    where claim_id = @claim_id
+ALTER PROCEDURE [dbo].[Usp_adj_l10_line_level_deny_external]
+    @claim_procedure_id INT,
+    @claim_type_id INT,
+    @group_contract_id INT,
+    @adjudication_step_id INT,
+    @employergroup_id INT,
+    @parent_employergroup_id INT
+AS
+/*************************************************************************
+Name:			[dbo].[Usp_adj_l10_line_level_deny_external]
+Description:	
+Used by:		
+Test harness:	
+DECLARE @claim_procedure_id int = 224003815
+DECLARE @claim_type_id int = 2
+DECLARE @group_contract_id int = 248404
+DECLARE @adjudication_step_id int = 2
+declare @employergroup_id int = 56729
+DECLARE @parent_employergroup_id int = 56727
+DECLARE @return_status int
 
-    insert into mcr_dc_prod.dbo.claim_comment
-    (
-          claim_id
-        , comment
-        , active
-        , created_date
-        , created_user_id
-        , modified_date
-        , modified_user_id
-        , deleted
-        , claim_comment_type_id
-    )
-    values
-    (
-          @claim_id
-        , @claim_comment
-        , 1
-        , getdate()
-        , 0
-        , getdate()
-        , 0
-        , 0
-        , null
-    )
-end
+EXEC @return_status = [dbo].[Usp_adj_l10_line_level_deny_external] @claim_procedure_id, @claim_type_id, @group_contract_id, @adjudication_step_id, @employergroup_id, @parent_employergroup_id
 
--- Existing logic - leave as-is
-if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
-begin
-    update dbo.x12_837_2300
-    set error = 1,
-        processed = 1
-    where x12_837_2300_id = @x12_837_2300_id
-
-    goto NEXT_CLAIM
-end
+Print @return_status
 
 
-Subject: Story 45385 – Exact Search Terms and Change Locations
+Execution time: 
+Return values:	Procedure returns zero for success and non-zero for failure.
+Created:		KDW 7/8/2020
+Modified:		
+Modified: 05/12/2026	KDW 	44814   update for External Edit Direct Deny 
+Modified: 05/13/2026	DA 	    46447   update for External Edit Direct Deny  of Institutional claims 
+**************************************************************************/
+BEGIN
 
-SP to modify:
+    ---------------------------------------
+    --	Always include these two lines just above the "begin try".
+    --	ALL other lines of code go in the try/catch block.
+    ---------------------------------------
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-dbo.wf_ib_21_837_import
 
-CHANGE 1: Add new variables
+    ---------------------------------------
+    --	ALL content within TRY/CATCH
+    ---------------------------------------
+    BEGIN TRY
 
-Search for this text:
+        DECLARE @reportdate DATETIME;
+        DECLARE @SProc VARCHAR(50);
+        SET @reportdate = GETDATE();
+        SET @SProc = OBJECT_NAME(@@PROCID);
 
-– 45385
+        DECLARE @all_edits BIT = 'False';
+        DECLARE @remove_remarks BIT = 'False';
+        DECLARE @edit_code VARCHAR(50) = '';
+        DECLARE @set_to_deny BIT = 'False';
+        DECLARE @adlp_id INT ;
+        DECLARE @return_status INT = 0;
+        DECLARE @exclusion_check INT = 0;
+        DECLARE @revision_number INT;
+        DECLARE @adjudication_procedure_deny_log_id INT; --44814
+        DECLARE @claim_procedure_external_edit_id BIGINT; --44814
+        DECLARE @tc_error_message NVARCHAR(4000);
+                --US 46447
+        DECLARE @UB9_edits_exist bit = 0;
+        DECLARE @all_service_lines_denied BIT = 1
+        DECLARE @claim_procedure_status_id INT
+        DECLARE @denycounter INT = 0
+        DECLARE @service_lines_count INT = 0
+        DECLARE @diff_edit_codes BIT
+        --DECLARE @edit_code VARCHAR(5)
+        DECLARE @new_claim_procedure_id INT
+          IF OBJECT_ID('UB9_Servicelines1', 'U') IS NOT NULL
+          DROP TABLE UB9_Servicelines1
+        -- Create table to hold service lines
+       CREATE TABLE UB9_Servicelines1(
+       ID INT IDENTITY(1,1) PRIMARY KEY,
+       claim_procedure_id INT,
+       claim_ub92_service_id INT,
+       claim_ub92_service_external_edit_id INT,
+       adjudication_procedure_line_deny INT,
+       edit_code VARCHAR(5),
+      -- sequence_number INT,
+      -- claim_procedure_status_id INT,
+       deny_service_line bit
+       )
 
-You should see:
 
-declare @inprocess_claim_workflow_id     int
-,   @claim_workflow_id               int
+        ----44814
+        ----first, let's show we were here
+        --INSERT INTO [dbo].[adjudication_procedure_line_deny_log]
+        --(
+        --    [claim_procedure_id],
+        --    [log_date]
+        --)
+        --VALUES
+        --(@claim_procedure_id, @reportdate);
 
-Change it to:
+        --SET @adjudication_procedure_deny_log_id = SCOPE_IDENTITY();
 
-declare @inprocess_claim_workflow_id     int
-,   @claim_workflow_id               int
-,   @inprocess_claim_workflow_type_id int
-,   @review_claim_workflow_type_id   int
-,   @review_claim_workflow_id        int
-,   @claim_id                        int
-,   @claim_comment                   varchar(max)
+        ---------------------------------------------------------
+        --	JJT	10/12/2023
+        --	For revision # > 0 we'll allow examiner to override.
+        --	Shannon Junek	10/12/2023
+        ---------------------------------------------------------
+        SELECT @revision_number = [c].[revision_number]
+        FROM [claim] [c]
+            INNER JOIN [claim_procedure] [cp]
+                ON [cp].[claim_id] = [c].[claim_id]
+        WHERE [cp].[claim_procedure_id] = @claim_procedure_id;
 
-CHANGE 2: Initialize new variables
+        IF @revision_number > 0
+        BEGIN
+            IF EXISTS(     SELECT 1
+            FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+            WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                  AND [cpee].[deny_service_line] = 1
+                  --  10.12.2023  JJT  Allow examiners to override if revision # > 0
+                  AND [cpee].[deleted] = 0
+                  AND [cpee].[override] = 0 )
+                BEGIN
+                    --is there an edit for this procedure line and is it set to deny
+                    --gather edit code in case this is specific to edit
+                    SELECT TOP 1
+                           @set_to_deny = 'True',
+                           @edit_code = [cpee].[edit_code],
+                           @claim_procedure_external_edit_id = [cpee].[claim_procedure_external_edit_id]
+                    FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+                    WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                          AND [cpee].[deny_service_line] = 1
 
-Search for this text:
+                          --  10.12.2023  JJT  Allow examiners to override if revision # > 0
+                          AND [cpee].[deleted] = 0
+                          AND [cpee].[override] = 0;
+                END
+          -- Check claim type for UB9
+            ELSE IF (@claim_type_id = 3) AND (@set_to_deny = 'False')-- Institutional claims US 46447
+            BEGIN
+                SELECT TOP 1
+				       @set_to_deny = 'True',
+				      -- @edit_code = [cpee].[edit_code],
+                       @UB9_edits_exist = 1 -- 46447 set flag to do UB9 service line updates
+			    FROM [dbo].[claim_ub92_service_external_edit] AS [cpee]
+                 INNER JOIN [dbo].[claim_ub92_service] AS [ubs]
+                                ON [ubs].[claim_ub92_service_id] = [cpee].[claim_ub92_service_id]
+                 INNER JOIN [dbo].[claim_procedure] AS [cp]
+                        ON [cp].[claim_procedure_id] = [ubs].[claim_procedure_id]
+			    WHERE [ubs].[claim_procedure_id] = @claim_procedure_id
+                      AND [cpee].deny_service_line = 1
+				      and cpee.deleted = 0
+            END -- @claim_type_id = 3
 
-set @inprocess_claim_workflow_id = null
+       --    SELECT  @UB9_edits_exist UB9_edits_exist
 
-You should see:
+        END;
+        ELSE
+        BEGIN
+            IF EXISTS( SELECT  1
+            FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+            WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                  AND [cpee].[deny_service_line] = 1
+                  AND [cpee].[deleted] = 0)
+            BEGIN
+                --is there an edit for this procedure line and is it set to deny
+                --gather edit code in case this is specific to edit
+                SELECT TOP 1
+                       @set_to_deny = 'True',
+                       @edit_code = [cpee].[edit_code],
+                       @claim_procedure_external_edit_id = [cpee].[claim_procedure_external_edit_id]
+                FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+                WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                      AND [cpee].[deny_service_line] = 1
+                      AND [cpee].[deleted] = 0;
+            END
+         -- Check claim type for UB9
+            ELSE IF (@claim_type_id = 3) AND (@set_to_deny = 'False')-- Institutional claims US 46447
+            BEGIN
+                SELECT TOP 1
+				       @set_to_deny = 'True',
+				      -- @edit_code = [cpee].[edit_code],
+                       @UB9_edits_exist = 1 -- 46447 set flag to do UB9 service line updates
+			    FROM [dbo].[claim_ub92_service_external_edit] AS [cpee]
+                 INNER JOIN [dbo].[claim_ub92_service] AS [ubs]
+                                ON [ubs].[claim_ub92_service_id] = [cpee].[claim_ub92_service_id]
+                 INNER JOIN [dbo].[claim_procedure] AS [cp]
+                        ON [cp].[claim_procedure_id] = [ubs].[claim_procedure_id]
+			    WHERE [ubs].[claim_procedure_id] = @claim_procedure_id
+                      AND [cpee].deny_service_line = 1
+				      and cpee.deleted = 0
 
-set @inprocess_claim_workflow_id = null
-set @claim_workflow_id = null
+     -- SELECT  @UB9_edits_exist UB9_edits_exist
 
-Change it to:
+            END -- @claim_type_id = 3
 
-set @inprocess_claim_workflow_id = null
-set @claim_workflow_id = null
-set @inprocess_claim_workflow_type_id = null
-set @review_claim_workflow_type_id = null
-set @review_claim_workflow_id = null
-set @claim_id = null
-set @claim_comment = null
+        END;
 
-CHANGE 3: Replace repricing configuration lookup
+        --	JJT 10/12/2023 Replaced with code above.
+        --is there an edit for this procedure line and is it set to deny
+        --gather edit code in case this is specific to edit
+        --SELECT TOP 1
+        --       @set_to_deny = 'True',
+        --       @edit_code = [cpee].[edit_code]
+        --FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+        --WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+        --      AND [cpee].[recommended_action] = 'DENY'
 
-Search for this text:
 
-select @inprocess_claim_workflow_id = @trading_partner_file_type_id
+        SELECT @exclusion_check = COUNT(*)
+        FROM [dbo].[adjudication_edit_exclusion] AS [aee]
+            INNER JOIN [dbo].[adjudication_procedure_line_edit_type] AS [aplet]
+                ON [aplet].[adjudication_procedure_line_edit_type_id] = [aee].[adjudication_procedure_line_edit_type_id]
+        WHERE [aplet].[adjudication_procedure_line_edit_type_name] = 'external_edits'
+              AND [aee].[employer_group_id] = @employergroup_id
+              AND [aee].[adjudication_edit_code] = @edit_code
+              AND [aee].[deleted] = 0;
 
-You should see:
 
-select @inprocess_claim_workflow_id = @trading_partner_file_type_id
-from dbo.repricing_configuration (nolock)
-where inbound_trading_partner_file_type_id = @trading_partner_file_type_id
+  --      Print 'set to deny'
+  --      Print @set_to_deny
+  --      Print 'edit code'
+  --      Print @edit_code
+		--PRINT @exclusion_check
 
-Replace it with:
 
-select top 1
-@inprocess_claim_workflow_type_id = rc.in_process_claim_workflow_type_id
-, @review_claim_workflow_type_id = rc.review_claim_workflow_type_id
-from dbo.repricing_configuration rc with (nolock)
-where rc.inbound_trading_partner_file_type_id = @trading_partner_file_type_id
-and rc.deleted = 0
+         SELECT @all_edits = [apld].[include_all_edits],
+                       @remove_remarks = [apld].[remove_remark_codes],
+                       @adlp_id = [apld].[adjudication_procedure_line_deny_id]
+                FROM [dbo].[adjudication_procedure_line_deny] AS [apld]
+                    INNER JOIN [dbo].[adjudication_procedure_line_edit_type] AS [aplet]
+                        ON [aplet].[adjudication_procedure_line_edit_type_id] = [apld].[adjudication_procedure_line_edit_type_id]
+                WHERE [aplet].[adjudication_procedure_line_edit_type_name] = 'external_edits'
+                      AND [apld].[claim_type_id] = @claim_type_id
+                      AND
+                      (
+                          (
+                              ISNULL([apld].[group_contract_id], 0) = @group_contract_id
+                              AND [apld].[adjudication_field_type_id] = 1
+                          )
+                          OR
+                          (
+                              ISNULL([apld].[employergroup_id], 0) = @employergroup_id
+                              AND [apld].[adjudication_field_type_id] = 2
+                          )
+                          OR
+                          (
+                              ISNULL([apld].[parent_employergroup_id], 0) = @parent_employergroup_id
+                              AND [apld].[adjudication_field_type_id] = 3
+                          )
+                      )
+                      AND [apld].[adjudication_step_id] = @adjudication_step_id
+                      AND [apld].[Active] = 'True';
 
-select top 1
-@inprocess_claim_workflow_id = cw.claim_workflow_id
-from mcr_dc_prod.dbo.claim_workflow cw with (nolock)
-where cw.claim_workflow_type_id = @inprocess_claim_workflow_type_id
-order by cw.sequence_number
+                --Print 'all edits'
+                --Print @all_edits
+                --Print 'remove remarks'
+                --Print @remove_remarks
+                --Print 'id'
+                --Print @adlp_id
 
-select top 1
-@review_claim_workflow_id = cw.claim_workflow_id
-from mcr_dc_prod.dbo.claim_workflow cw with (nolock)
-where cw.claim_workflow_type_id = @review_claim_workflow_type_id
-order by cw.sequence_number
+   
+          IF @UB9_edits_exist = 1 AND @set_to_deny = 'True' 
+            BEGIN
 
-CHANGE 4: Replace claim lookup
+                INSERT INTO UB9_Servicelines1( claim_procedure_id, claim_ub92_service_id, claim_ub92_service_external_edit_id, adjudication_procedure_line_deny, edit_code, deny_service_line)
+                SELECT [ubs].[claim_procedure_id],
+                        [ubs].[claim_ub92_service_id],
+                        [cpee].[claim_ub92_service_external_edit_id],
+                        @adlp_id ,
+                        [cpee].[edit_code],
+                        [cpee].deny_service_line                        
+                FROM [dbo].[claim_ub92_service_external_edit] AS [cpee]
+                        INNER JOIN [dbo].[claim_ub92_service] AS [ubs]
+                                    ON [ubs].[claim_ub92_service_id] = [cpee].[claim_ub92_service_id]
+                        INNER JOIN [dbo].[claim_procedure] AS [cp]
+                            ON [cp].[claim_procedure_id] = [ubs].[claim_procedure_id]
+			        WHERE [ubs].[claim_procedure_id] = @claim_procedure_id				           
+                            AND [cpee].deny_service_line = 1
+				            and cpee.deleted = 0  
 
-Search for this text:
+                 SELECT @denycounter = COUNT(*) from UB9_Servicelines1 WHERE deny_service_line = 1
+                 SELECT @service_lines_count = COUNT(*) FROM [dbo].[claim_ub92_service] AS [ubs] where ubs.claim_procedure_id = @claim_procedure_id
 
-select @claim_workflow_id = c.claim_workflow_id
+                 --select @service_lines_count service_lines_count
+                 --SELECT @denycounter denycounter 
+                 --select * from UB9_Servicelines
 
-You should see:
+  			    IF ( SELECT COUNT(DISTINCT edit_code) 
+                        FROM UB9_Servicelines1 WHERE edit_code IS NOT NULL) = 1
+                     BEGIN
+                            SET @diff_edit_codes = 0
+                             SELECT @edit_code =  edit_code  FROM UB9_Servicelines1 
+ 				    END
+                        ELSE
+                        BEGIN
+                             SET @diff_edit_codes = 1
+                        END  
+                    
+                     --   SELECT @diff_edit_codes diff_edit_codes
+             END
+                                  
+            --US DA 46447
+            IF (@diff_edit_codes = 0)  -- All service lines of claim_procedure status are denied
+            BEGIN
 
-select @claim_workflow_id = c.claim_workflow_id
-from dbo.x12_837_2300_REF ref
-inner join mcr_dc_prod.dbo.claim c on c.claim_id = ref.L2300_ref02_reference
-WHERE ref.x12_837_2300_id = @x12_837_2300_id
-AND ref.L2300_ref01_code = ‘F8’
-AND ISNUMERIC(ref.L2300_ref02_reference) = 1
+            IF (@denycounter = @service_lines_count) AND (@set_to_deny = 'True')-- All service lines of claim_procedure status are denied
+                BEGIN
+                EXEC @return_status = [dbo].[claim_ub92_service_external_edit_deny] @all_service_lines_denied,@edit_code,@claim_procedure_id,  @new_claim_procedure_id OUT
+                    IF @return_status <> 0  
+                    BEGIN  
+                        -- ========== RAISE ERROR: LOG MESSAGE A =================================
+                        SET @tc_error_message = 'Error creating new claim Procedure and assigning ALL denied service lines to new claim_procedure'
+	                   -- RAISERROR(@error_message, 16, 1) 
+                    END
+                END
+            ELSE IF (@denycounter <> @service_lines_count) AND (@set_to_deny = 'True') -- Atleast one service line of claim_procedure not denied
+                BEGIN
+                    SET @all_service_lines_denied = 0
+                    EXEC @return_status = [dbo].[claim_ub92_service_external_edit_deny] @all_service_lines_denied,@edit_code, @claim_procedure_id, @new_claim_procedure_id OUT
+                    IF @return_status <> 0  
+                    BEGIN  
+                        -- ========== RAISE ERROR: LOG MESSAGE A =================================
+                        SET @tc_error_message = 'Error creating new claim Procedure and assigning DENIED service lines to new claim_procedure'
+	                   -- RAISERROR(@error_message, 16, 1) 
+                    END
+                END
 
-Replace it with:
+                -- Add to deny log for all service lines that are denied 
+                   INSERT INTO [dbo].[adjudication_procedure_line_deny_log]
+                            SELECT @adlp_id,@claim_procedure_id, null, claim_ub92_service_id, claim_ub92_service_external_edit_id, edit_code,  @set_to_deny,@reportdate,0, null
+                             FROM  UB9_Servicelines1 WHERE edit_code = @edit_code
 
-select
-@claim_id = c.claim_id
-, @claim_workflow_id = c.claim_workflow_id
-from dbo.x12_837_2300_REF ref
-inner join mcr_dc_prod.dbo.claim c
-on c.claim_id = convert(int, ref.L2300_ref02_reference)
-where ref.x12_837_2300_id = @x12_837_2300_id
-and ref.L2300_ref01_code = ‘F8’
-and isnumeric(ref.L2300_ref02_reference) = 1
+             END -- End diff edit codes = 0
+            ELSE IF (@diff_edit_codes = 1)
+            BEGIN
+             DECLARE @edit_codes TABLE(
+                RowNum INT IDENTITY(1,1),
+                edit_code VARCHAR(5)
+                )
+           
+                INSERT INTO @edit_codes
+                SELECT DISTINCT(edit_code) FROM UB9_Servicelines1
 
-CHANGE 5: Replace skip block
+                DECLARE @totalCount  INT
+                DECLARE @counter INT = 1
+                SELECT @totalCount = COUNT(*) FROM @edit_codes;
+                WHILE (@counter <= @totalCount)
+                BEGIN
+                 -- SELECT @edit_code = remark_code FROM @edit_codes  where RowNum = @counter
+                    SELECT @edit_code = edit_code FROM @edit_codes  where RowNum = @counter
+                --SELECT @denycounter = COUNT(*) FROM UB9_Servicelines WHERE deny_service_line = 1 and remark_code = @edit_code  
+                   SELECT @denycounter = COUNT(*) FROM UB9_Servicelines1 WHERE deny_service_line = 1 and edit_code = @edit_code
+                    SELECT @service_lines_count = COUNT(*) FROM [dbo].[claim_ub92_service] [cus]
+                     INNER JOIN [dbo].[claim_ub92_service_external_edit] [cpee]                       
+                        ON [cus].[claim_ub92_service_id] = [cpee].[claim_ub92_service_id]
+                      --  WHERE [cus].[claim_procedure_id] = @claim_procedure_id and cpee.era_remark_code = @edit_code
+                      WHERE [cus].[claim_procedure_id] = @claim_procedure_id and cpee.edit_code = @edit_code
+                    
+                        IF (@denycounter = @service_lines_count) AND (@set_to_deny = 'True')  
+                        BEGIN
+                        SET @all_service_lines_denied = 1
+                        EXEC @return_status = [dbo].[claim_ub92_service_external_edit_deny] @all_service_lines_denied, @edit_code,@claim_procedure_id,  @new_claim_procedure_id OUT
+                            IF @return_status <> 0  
+                            BEGIN  
+                                -- ========== RAISE ERROR: LOG MESSAGE A =================================
+                                SET @tc_error_message = 'Error creating new claim Procedure and assigning ALL denied service lines to new claim_procedure'
+	                           -- RAISERROR(@error_message, 16, 1) 
+                            END
+                         END
+                        ELSE IF (@denycounter <> @service_lines_count) AND (@set_to_deny = 'True')  -- Atleast one service line of claim_procedure not denied
+                            BEGIN
+                                SET @all_service_lines_denied = 0
+                            EXEC @return_status = [dbo].[claim_ub92_service_external_edit_deny] @all_service_lines_denied,@edit_code,@claim_procedure_id,  @new_claim_procedure_id OUT
+                            IF @return_status <> 0  
+                            BEGIN  
+                                -- ========== RAISE ERROR: LOG MESSAGE A =================================
+                                SET @tc_error_message = 'Error creating new claim Procedure and assigning DENIED service lines to new claim_procedure'
+	                           -- RAISERROR(@error_message, 16, 1) 
+                            END
+                            -- Add to deny log for service lines that are denied with different remark codes
+                            INSERT INTO [dbo].[adjudication_procedure_line_deny_log]
+                            SELECT @adlp_id,@claim_procedure_id, null, claim_ub92_service_id, claim_ub92_service_external_edit_id, edit_code,  @set_to_deny,@reportdate,0, null
+                             FROM  UB9_Servicelines1 WHERE edit_code = @edit_code
+                        END
 
-Search for this text:
+                       SET @counter += 1
+                END 
+            END --End diff remark codes = 0
 
-if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
+            IF @set_to_deny = 'True' 
+               AND ISNULL(@exclusion_check, 0) = 0
+            BEGIN
+		
+               
+                --right now this is only written for all edits.  
+                --the flexibility is there to add the else for specific edits later.
+                IF @all_edits = 'True'
+                BEGIN
+                    IF @remove_remarks = 'False'
+                    BEGIN
+                        SET @return_status = -200;
+                   -- Print @return_status
+                    RETURN @return_status;  --44814
+                    END; --@remove_remarks = 'False'
+                    ELSE --remove remark codes
+                    BEGIN
+                        --remove remark codes here
+                        --there is a trigger tr_claim_procedure_eob_del that will move a copy of this to claim_procedure_eob_audit
+                        DELETE FROM [dbo].[claim_procedure_eob]
+                        WHERE [claim_procedure_id] = @claim_procedure_id;
 
-You should see:
+                        SET @return_status = -200;
+                   -- Print @return_status
+                    RETURN @return_status;  --44814
+                    END;
 
-if @inprocess_claim_workflow_id <> isnull(@claim_workflow_id, 0)
-begin
-update x12_837_2300 set error = 1, processed = 1 WHERE x12_837_2300_id = @x12_837_2300_id –and error = 0
-GOTO NEXT_CLAIM
-end
+                END; --@all_edits = 'True'
 
-Replace it with:
 
-if @claim_id is not null
-and @claim_workflow_id = @inprocess_claim_workflow_id
-and @review_claim_workflow_id is not null
-begin
-set @claim_comment =
-‘This claim was returned on ’
-+ isnull(convert(varchar(255), @p_x12_file_id), ‘’)
-+ ’ but could not be imported due to file errors’
+            END; --@set_to_deny = 'True'
+                 --if it is not set to deny we aren't worried about it right now
+                 --this could have a pend option later if needed
+                 --right now this should also handle if the record is not there
+            ELSE
+            BEGIN
+                SET @return_status = 0;
+            --Print @return_status
+            --RETURN @return_status;  --44814
+            END;
 
-update mcr_dc_prod.dbo.claim
-set claim_workflow_id = @review_claim_workflow_id
-  , date_modified = getdate()
-  , os_user_name = suser_sname()
-where claim_id = @claim_id
-insert into mcr_dc_prod.dbo.claim_comment
-(
-      claim_id
-    , comment
-    , active
-    , created_date
-    , created_user_id
-    , modified_date
-    , modified_user_id
-    , deleted
-    , claim_comment_type_id
-)
-values
-(
-      @claim_id
-    , @claim_comment
-    , 1
-    , getdate()
-    , 0
-    , getdate()
-    , 0
-    , 0
-    , null
-)
+            IF @claim_type_id = 2  AND @set_to_deny = 'True' 
+            BEGIN
+                INSERT INTO [dbo].[adjudication_procedure_line_deny_log]
+               SELECT @adlp_id,@claim_procedure_id, @claim_procedure_external_edit_id, null, null, @edit_code, @set_to_deny,@reportdate, 0,null                
+            END
+            --ELSE
+            --BEGIN
 
-end
+            --    INSERT INTO [dbo].[adjudication_procedure_line_deny_log](
+            --   [adjudication_procedure_line_deny_id],[claim_procedure_id],[claim_procedure_external_edit_id],[edit_code],[denied],[log_date])
+            --    VALUES(@adlp_id,@claim_procedure_id, @claim_procedure_external_edit_id, @edit_code,@set_to_deny,@reportdate)          
 
-update dbo.x12_837_2300
-set error = 1,
-processed = 1
-where x12_837_2300_id = @x12_837_2300_id
+            --END    
+          --  select * from [dbo].[adjudication_procedure_line_deny_log] order by adjudication_procedure_line_deny_log_id desc
+          
+        RETURN @return_status;
 
-goto NEXT_CLAIM
+    END TRY
+    BEGIN CATCH
 
-WHAT THIS DOES
+        SET @tc_error_message = ERROR_MESSAGE();
 
-1. Finds the claim returned by the trading partner using F8.
-2. Gets in-process and review workflow type IDs from repricing_configuration.
-3. Converts those workflow type IDs into actual claim_workflow_id values using claim_workflow.
-4. Only moves the claim if it is currently in the configured in-process workflow.
-5. Updates claim.claim_workflow_id to the configured review workflow.
-6. Inserts a claim_comment.
-7. Preserves the existing x12_837_2300 error/processed behavior.
-8. Continues to NEXT_CLAIM.
+        INSERT INTO [dbo].[adjudication_procedure_line_deny_log]( claim_procedure_id,is_error, error_message, log_date)
+         VALUES(@claim_procedure_id, 1,@tc_error_message, GETDATE())
+        --UPDATE [dbo].[adjudication_procedure_line_deny_log]
+        --SET [is_error] = 1,
+        --    [error_message] = @tc_error_message
+        --WHERE [adjudication_procedure_line_deny_log_id] = @adjudication_procedure_deny_log_id;
 
-STILL TO CONFIRM
 
-1. Replace @p_x12_file_id in the comment with the actual inbound/trading partner filename column when identified.
-2. Replace “file errors” with the actual error reason if available.
-3. Confirm created_user_id and modified_user_id should be 0.
-4. Confirm claim_comment_type_id can be null.
+		--still raise error to catch in adjudication
+		RAISERROR(@tc_error_message, 15,1)
+
+
+        RETURN 1; --	Execution aborts if throw is executed in a catch statement so this return is here just for show.  The return value will actually be NULL, which is not 0, so NULL = failure.
+
+    END CATCH;
+END;
+
