@@ -1,29 +1,10 @@
-Description: 
-
- 
-
-As pricing config, I want claims to go to their designated review queue if they are returned on an inbound file from a trading partner, but was skipped due to errors on the file. (see #45385)
+Refined -6-3-2026
+QA-3
+Dev-1
 
 
+If a claim is not an R0 claim, even if the claim has active external edits that are set to deny_service_line = 1, do not automatically set the claim procedure lines to denied, follow normal logic that would just pend the claim procedure.
 
 
-
-
-
- 
-
-Objectives:
-
- 
-
-We need to deliver the following:
-
-If a claim is received back on an inbound file with errors and the pricing does not get imported due to it, I want the claim the pricing was for to be moved out of the in process queue and into the associated review queue with a comment indicating the pricing was not loaded due to file errors.  
-Claim comment: 'This claim was returned on 'trading_partner_filename' but could not be imported due to (error reason)
-claim workflow id that claim should be updated to, will come from the corresponding repricing config for that trading partner
- 
-
-Additional Information:
-
-proc: wf_21_837_import
+If claim has the newborn processing flag on it, do not allow the direct deny by external edit
 
