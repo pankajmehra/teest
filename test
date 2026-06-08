@@ -476,3 +476,48 @@ BEGIN
     END CATCH;
 END;
 
+IF @revision_number > 0 OR ISNULL(@newborn_processing_flag, 0) = 1     
+        BEGIN
+            SET @set_to_deny = 'False';
+            SET @UB9_edits_exist = 0;
+        END;
+        ELSE
+        BEGIN
+            IF EXISTS( SELECT  1
+            FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+            WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                  AND [cpee].[deny_service_line] = 1
+                  AND [cpee].[deleted] = 0)
+            BEGIN
+                --is there an edit for this procedure line and is it set to deny
+                --gather edit code in case this is specific to edit
+                SELECT TOP 1
+                       @set_to_deny = 'True',
+                       @edit_code = [cpee].[edit_code],
+                       @claim_procedure_external_edit_id = [cpee].[claim_procedure_external_edit_id]
+                FROM [dbo].[claim_procedure_external_edit] AS [cpee]
+                WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+                      AND [cpee].[deny_service_line] = 1
+                      AND [cpee].[deleted] = 0;
+            END
+         -- Check claim type for UB9
+            ELSE IF (@claim_type_id = 3) AND (@set_to_deny = 'False')-- Institutional claims US 46447
+            BEGIN
+                SELECT TOP 1
+				       @set_to_deny = 'True',
+				      -- @edit_code = [cpee].[edit_code],
+                       @UB9_edits_exist = 1 -- 46447 set flag to do UB9 service line updates
+			    FROM [dbo].[claim_ub92_service_external_edit] AS [cpee]
+                 INNER JOIN [dbo].[claim_ub92_service] AS [ubs]
+                                ON [ubs].[claim_ub92_service_id] = [cpee].[claim_ub92_service_id]
+                 INNER JOIN [dbo].[claim_procedure] AS [cp]
+                        ON [cp].[claim_procedure_id] = [ubs].[claim_procedure_id]
+			    WHERE [ubs].[claim_procedure_id] = @claim_procedure_id
+                      AND [cpee].deny_service_line = 1
+				      and cpee.deleted = 0
+
+     -- SELECT  @UB9_edits_exist UB9_edits_exist
+
+            END -- @claim_type_id = 3
+
+        END;
