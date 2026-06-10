@@ -1,10 +1,10 @@
-Refined -6-3-2026
-QA-3
-Dev-1
+I need to review the EOP process and the paper EOP to determine what is off.
 
+Deliver: Refer to the "Remarks" section in the screenshot below of a paper EOP example
+Determine what the 010 is referring to and if it is needed. 
+Determine where the actual remark code is situated for the two large sections ( those are the lines in the EOB that are being referenced) 
+Determine character limitation to the field in the payment file. 
+In the payment file record 21 data element cRemarkCode Description has a field length of 1200
 
-If a claim is not an R0 claim, even if the claim has active external edits that are set to deny_service_line = 1, do not automatically set the claim procedure lines to denied, follow normal logic that would just pend the claim procedure.
-
-
-If claim has the newborn processing flag on it, do not allow the direct deny by external edit
-
+aCCEPTANCE CRITERIA
+Lines are not truncated and the appropriate remark code is included as a reference to the line numbers presented.
