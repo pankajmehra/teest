@@ -1,0 +1,32 @@
+
+ITEM 1 — Remark Code Field (cRemarkCode) in Record 21
+
+Currently the cRemarkCode field is hardcoded to the value '010' for every remark record, regardless of the actual remark code. Based on the paper EOP, the real remark codes (e.g., 02, 053) are present in the source data.
+
+Question: Should the cRemarkCode field in Record 21 carry the actual remark code (e.g., 02, 053)? Or is 010 an intentional value with a specific business meaning?
+
+---
+
+ITEM 2 — Remark Code Appearing Inside the Description Text
+
+The remark description stored in the source table combines the remark code and description into one string (e.g., '02PROC INELIGIBLE PROCEDURE CODES'). This full combined string is currently being written into the cRemarkDescription field, meaning the code appears in both fields simultaneously.
+
+Question: Should the remark code be separated from the description text and placed only in the cRemarkCode field, leaving the description field with clean text only? Or does the business require the code to remain visible inside the description as well?
+
+---
+
+ITEM 3 — Line Number Truncation
+
+The stored procedure currently limits the cRemarkDescription field to 1000 characters. When a remark applies to a large number of service lines, the concatenated list of line numbers plus the description text exceeds this limit, causing line numbers to be silently dropped from the output.
+
+This conflicts with the acceptance criteria which states: 'Lines are not truncated and the appropriate remark code is included as a reference to the line numbers presented.'
+
+Question: Can you confirm that the payment file Record 21 cRemarkDescription field allows 1200 characters? If confirmed, we will update the stored procedure from 1000 to 1200 to prevent truncation and meet the acceptance criteria.
+
+---
+
+ITEM 4 — Field Length Conflict Between SP and Payment File Spec
+
+The stored procedure's internal record layout comment documents cRemarkDescription as 1000 characters, while the payment file specification states the field allows 1200 characters. These two sources are currently in conflict.
+
+Question: What is the authoritative field length for cRemarkDescription in Record 21 — 1000 characters per the SP documentation or 1200 characters per the payment file spec? We will update the SP to match whichever is confirmed.
