@@ -1,3 +1,41 @@
+
+Change 1 — Header Comment
+Added 06/17/2026 - US#10023 change log entry describing all four changes including the new chunking logic.
+
+Change 2 — New Variables (Extraction)
+sqlDECLARE @split_pos       INT
+DECLARE @clean_description VARCHAR(1200)
+
+Change 3 — New Variables (Chunking)
+sqlDECLARE @chunk           VARCHAR(1200)  -- current chunk being built
+DECLARE @chunk_line_part VARCHAR(10)    -- one line number entry e.g. " 181,"
+DECLARE @available_chars INT            -- 1200 minus description suffix length
+DECLARE @desc_suffix     VARCHAR(1210)  -- "; PROC INELIGIBLE..." appended to each chunk
+DECLARE @is_last_line    BIT            -- is this the last line in the list
+
+Change 4 — Remark Code Extraction
+PATINDEX splits numeric code from description text. Falls back to 010 if no numeric prefix found.
+
+Change 5 — ACCUM Path
+Unchanged in behavior — writes a single record, no chunking. Uses @clean_description instead of @remark_description.
+
+Change 6 — Chunking Logic (Core Change)
+For non-ACCUM remarks:
+
+Calculates @available_chars = 1200 - LEN("; " + description)
+Loops through line numbers one at a time
+When next line number would overflow — writes current chunk as Record 21, starts fresh chunk
+After loop ends — writes the final chunk
+Every chunk carries the real remark code and description at the end
+
+
+How Each Chunk Looks in the File
+Chunk 1:  02 | Line 1, 2, 3...146; PROC INELIGIBLE PROCEDURE CODES
+Chunk 2:  02 | Line 147, 148...275; PROC INELIGIBLE PROCEDURE CODES
+No truncation. No lost lines. Description always at the end of every chunk.
+
+	
+
 USE [mcr_dc_prod]
 GO
 /****** Object:  StoredProcedure [dbo].[check_run_remarkcodedescription_redcard]    Script Date: 6/12/2026 12:46:07 PM ******/
