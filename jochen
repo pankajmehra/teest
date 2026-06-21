@@ -1,4 +1,12 @@
-			begin catch
+		 select top 1
+								cw.claim_workflow_id
+from repricing_claim_history h
+								inner join edee.dbo.repricing_configuration rc on rc.repricing_configuration_id = h.repricing_configuration_id
+								inner join mcr_dc_prod.dbo.claim_workflow cw with (nolock) on cw.claim_workflow_type_id = rc.review_claim_workflow_type_id
+								where h.claim_id = 112563161
+								order by h.repricing_claim_history_id desc, cw.sequence_number
+
+begin catch
 
 				-- if we crashed in the above procedure it will likely be in the middle of a transaction.
 
