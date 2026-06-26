@@ -8,3 +8,17 @@ In the payment file record 21 data element cRemarkCode Description has a field l
 
 aCCEPTANCE CRITERIA
 Lines are not truncated and the appropriate remark code is included as a reference to the line numbers presented.
+private bool HasSearchCriteria()
+{
+    return SelectedParentEmployerGroupUD != null
+        || SelectedEmployerGroupUD != null
+        || SelectedGroupContractUD != null
+        || SelectedBenefitPlanUd != null
+        || !string.IsNullOrWhiteSpace(SearchCriteria.ParentEmployerGroupUd)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.EmployerGroupUd)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.GroupContractUd)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.BenefitPlanUd)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.EffectiveDate)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.ThruDate)
+        || !string.IsNullOrWhiteSpace(SearchCriteria.Comment);
+}
