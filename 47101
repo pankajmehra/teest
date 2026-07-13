@@ -106,3 +106,25 @@ private async void Page_Loaded(object sender, RoutedEventArgs e)
                   Mode=TwoWay,
                   UpdateSourceTrigger=PropertyChanged}" />
 */
+private async void SearchCriteria_KeyDown(
+    object sender,
+    KeyRoutedEventArgs e)
+{
+    if (e.Key != Windows.System.VirtualKey.Enter)
+        return;
+
+    // For AutoSuggestBox, allow Enter to select an open suggestion first.
+    if (sender is AutoSuggestBox autoSuggestBox &&
+        autoSuggestBox.IsSuggestionListOpen)
+        return;
+
+    // Same rule as the Search button:
+    // search only when at least one search criterion exists.
+    if (!ViewModel.SearchCommand.CanExecute(null))
+        return;
+
+    e.Handled = true;
+
+    await ViewModel.SearchCommand.ExecuteAsync(null);
+}
+
