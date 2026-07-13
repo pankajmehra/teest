@@ -127,4 +127,26 @@ private async void SearchCriteria_KeyDown(
 
     await ViewModel.SearchCommand.ExecuteAsync(null);
 }
+private async void SearchCriteria_KeyDown(
+    object sender,
+    KeyRoutedEventArgs e)
+{
+    if (e.Key != Windows.System.VirtualKey.Enter)
+        return;
+
+    // While suggestions are open, Enter selects the highlighted suggestion.
+    if (sender is AutoSuggestBox autoSuggestBox &&
+        autoSuggestBox.IsSuggestionListOpen)
+    {
+        return;
+    }
+
+    if (!ViewModel.SearchCommand.CanExecute(null))
+        return;
+
+    e.Handled = true;
+
+    await ViewModel.SearchCommand.ExecuteAsync(null);
+}
+
 
