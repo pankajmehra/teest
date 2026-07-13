@@ -1,0 +1,108 @@
+// =======================================================
+// 1. VIEWMODEL
+// =======================================================
+
+private bool _isInitialLoadComplete;
+
+public async Task LoadAsync()
+{
+    // Loaded can fire more than once, so prevent duplicate searches
+    if (_isInitialLoadComplete)
+        return;
+
+    _isInitialLoadComplete = true;
+
+    var thruDate = DateTime.Today;
+    var effectiveDate = thruDate.AddMonths(-6);
+
+    // Actual values used by the API
+    SearchCriteria.EffectiveDate = effectiveDate;
+    SearchCriteria.ThruDate = thruDate;
+
+    // Values displayed in the TextBoxes
+    SearchCriteria.EffectiveDateText =
+        effectiveDate.ToString("MM/dd/yyyy");
+
+    SearchCriteria.ThruDateText =
+        thruDate.ToString("MM/dd/yyyy");
+
+    SearchCommand.NotifyCanExecuteChanged();
+
+    if (SearchCommand.CanExecute(null))
+    {
+        await SearchCommand.ExecuteAsync(null);
+    }
+}
+
+
+// =======================================================
+// 2. SEARCH COMMAND CAN-EXECUTE
+// =======================================================
+
+protected override bool OnSearchCommandCanExecute()
+{
+    return SelectedParentEmployerGroupUD != null
+        || SelectedEmployerGroupUD != null
+        || SelectedGroupContractUD != null
+        || SelectedBenefitPlanUd != null
+        || SearchCriteria.EffectiveDate.HasValue
+        || SearchCriteria.ThruDate.HasValue
+        || !string.IsNullOrWhiteSpace(SearchCriteria.Comment);
+}
+
+
+// =======================================================
+// 3. PAGE CODE-BEHIND
+// GroupHoldoverSearchPage.xaml.cs
+// =======================================================
+
+private async void Page_Loaded(object sender, RoutedEventArgs e)
+{
+    await ViewModel.LoadAsync();
+}
+
+
+// =======================================================
+// 4. PAGE XAML
+// Add Loaded="Page_Loaded" to the Page
+// =======================================================
+
+/*
+<Page
+    x:Class="YourNamespace.GroupHoldoverSearchPage"
+    Loaded="Page_Loaded">
+
+    <!-- existing page content -->
+
+</Page>
+*/
+
+
+// =======================================================
+// 5. EFFECTIVE DATE TEXTBOX XAML
+// =======================================================
+
+/*
+<TextBox
+    x:Name="EffectiveDate"
+    Header="Effective Date"
+    PlaceholderText="Pick a Date"
+    Text="{x:Bind ViewModel.SearchCriteria.EffectiveDateText,
+                  Mode=TwoWay,
+                  UpdateSourceTrigger=PropertyChanged}" />
+*/
+
+
+// =======================================================
+// 6. THRU DATE TEXTBOX XAML
+// =======================================================
+
+/*
+<TextBox
+    x:Name="ThruDate"
+    Header="Thru Date"
+    PlaceholderText="Pick a Date"
+    Text="{x:Bind ViewModel.SearchCriteria.ThruDateText,
+                  Mode=TwoWay,
+                  UpdateSourceTrigger=PropertyChanged}" />
+*/
