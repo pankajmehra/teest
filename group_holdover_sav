@@ -1,0 +1,220 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [web].[group_holdover_sav]    Script Date: 7/14/2026 9:35:35 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/*****************************************************************************************
+Name:			[web].[group_holdover_sav]
+Description:	Updates a group_holdover record or inserts new if it doesn't exist  	
+Test harness:	DECLARE @id  int, @msg varchar(255) 
+				EXEC [web].[group_holdover_sav]  'source',652,16584, 'TEST 456', null, null, '05/05/2025', '06/06/2026', 0,0, null, 4420, 'call stack', @id output, @msg output
+Execution time: < 1 second
+Created:        04/17/2026 AJ - US #46007
+modified:		
+*******************************************************************************************/
+
+ALTER         PROCEDURE [web].[group_holdover_sav]
+	@source VARCHAR(255),
+	@parent_employergroup_id INT,
+	@employergroup_id INT,
+	@employergroup_ud VARCHAR(15),
+	@group_contract_id INT ,
+	@benefitplan_id INT ,
+	@effective_date DATETIME,
+	@thru_date DATETIME,
+	@use_received_date BIT,
+	@use_incurred_date BIT,
+	@comment VARCHAR(255),
+	@p_user_id	INT,
+	@p_call_stack VARCHAR(MAX),
+	@group_holdover_table_id  INT OUTPUT,
+	@status_message VARCHAR(255) OUTPUT
+
+AS
+
+BEGIN
+	SET NOCOUNT ON
+
+	BEGIN TRY
+	---------------------------------------
+	--	Required Logging for All Procedures
+	---------------------------------------
+	DECLARE @debug					BIT
+	DECLARE @instance_id			UNIQUEIDENTIFIER
+	DECLARE @application_name		VARCHAR(100)
+	DECLARE @stored_procedure		NVARCHAR(128)
+	DECLARE @application_step		VARCHAR(100)
+	DECLARE @key_name				VARCHAR(100)
+	DECLARE @key_value				VARCHAR(100)
+	DECLARE @row_count				INT
+	DECLARE @start_time				DATETIME
+	DECLARE @previous_step_time		DATETIME
+	DECLARE @step_time				DATETIME
+	DECLARE @step_duration			BIGINT
+	DECLARE @total_duration			BIGINT
+	DECLARE @error_comment			VARCHAR(8000)
+	DECLARE @error_message			VARCHAR(8000)
+	DECLARE @is_error				BIT
+	DECLARE @created_user VARCHAR(50) = (SELECT DISTINCT 'WEBTPA\'+ SU.login_name FROM dbo.sec_user SU WHERE SU.sec_user_id = @p_user_id)
+	DECLARE @modified_user VARCHAR(50) = (SELECT DISTINCT 'WEBTPA\'+ SU.login_name FROM dbo.sec_user SU WHERE SU.sec_user_id = @p_user_id)
+
+	exec sp_set_session_context 'user_name', @created_user;
+	exec sp_set_session_context 'user_id', @p_user_id;
+	---------------------------------------
+	--	Initialize Debug Variables
+	---------------------------------------
+	SET @debug = 1		--	For performance timing
+	SET @instance_id = ISNULL(@instance_id, NEWID())
+
+	--	Maintain a call stack for error reporting
+	IF @p_call_stack is null set @p_call_stack = ''
+	ELSE SET @p_call_stack = @p_call_stack + ' | ' + ISNULL(OBJECT_NAME(@@PROCID),'unknown')
+
+	--	Add paramater list to call stack.
+	SET @p_call_stack = left(
+		@p_call_stack 
+		+ ' : Parameter List : '
+		+ '@p_user_id=' + ISNULL(CONVERT(VARCHAR,@p_user_id),'null')
+		, 8000
+		)
+
+	
+	SET @application_name	= 'Nexus/Websphere Web Client' 
+	SET @stored_procedure	= OBJECT_NAME(@@PROCID)
+	SET @start_time			= GETDATE()
+	SET @previous_step_time	= @start_time
+	
+	SET @application_step = 'Start'
+	SET @key_name = null
+	SET @key_value = null
+	SET @row_count = null
+	SET @step_time = GETDATE()
+	SET @step_duration = DATEDIFF(ms, @previous_step_time, @step_time)
+	SET @previous_step_time = @step_time		
+	SET @total_duration = DATEDIFF(ms, @start_time, @step_time)
+	SET @error_comment = null
+	SET @is_error = 0	
+
+	IF @debug = 1	
+		INSERT INTO application_log ( application_name, stored_procedure, application_step, KEY_NAME, key_value, row_count, step_time, step_duration, total_duration, call_stack, comment, is_error, error_message, instance_id )
+		VALUES ( @application_name, @stored_procedure, @application_step, @key_name, @key_value, @row_count, @start_time, @step_duration, @total_duration, null, @comment , @is_error, @error_message, @instance_id )
+
+	-------------------  performance monitoring code end  ------------------------
+
+		SET @source = 'MCRDC'
+		DECLARE @existing_records INT
+
+		----------------------------------------------------
+		--	check for duplicates
+		----------------------------------------------------
+		SELECT @existing_records = count(*)  FROM [mcr_dc_prod].[dbo].[group_holdover_table] 
+		WHERE source = @source  
+		AND (parent_employergroup_id = null or parent_employergroup_id is null or parent_employergroup_id = @parent_employergroup_id )
+		AND (employergroup_id = null or employergroup_id is null or employergroup_id = @employergroup_id )
+		AND (employergroup_ud = null or employergroup_ud is null or employergroup_ud = @employergroup_ud )
+		AND (group_contract_id = null or group_contract_id is null or group_contract_id = @group_contract_id) 
+		AND (benefitplan_id is null or benefitplan_id = null or benefitplan_id = @benefitplan_id)
+		AND effective_date = CAST(@effective_date as DATE) 
+		AND thru_date = CAST(@thru_date  as DATE)	
+
+		print @existing_records
+
+		IF @existing_records = 0 AND  NOT EXISTS( SELECT 1 FROM [mcr_dc_prod].[dbo].[group_holdover_table] WHERE group_holdover_table_id = @group_holdover_table_id)
+
+					BEGIN
+
+						SET @group_holdover_table_id = SCOPE_IDENTITY()
+
+						INSERT INTO [mcr_dc_prod].[dbo].[group_holdover_table]
+								([source], 	[employergroup_id], [employergroup_ud] , [group_contract_id], [benefitplan_id], [effective_date], [thru_date], [use_received_date], [use_incurred_date],
+								[comment],  [created_date], [created_user], [deleted], [parent_employergroup_id] ) 
+						VALUES
+								(@source, @employergroup_id, @employergroup_ud , @group_contract_id, @benefitplan_id,  CAST(@effective_date as DATE), CAST(@thru_date  as DATE), @use_received_date, @use_incurred_date,
+								@comment,  GETDATE(), @created_user, 0, @parent_employergroup_id) 
+
+						SET @status_message = 'Insert record Successful'
+						SET @group_holdover_table_id = SCOPE_IDENTITY()
+						
+					END
+
+		ELSE IF @existing_records > 0 AND  EXISTS( SELECT 1 FROM [mcr_dc_prod].[dbo].[group_holdover_table] WHERE group_holdover_table_id = @group_holdover_table_id)
+
+					BEGIN 
+					SELECT 1 FROM [mcr_dc_prod].[dbo].[group_holdover_table] WHERE group_holdover_table_id = @group_holdover_table_id
+						UPDATE [mcr_dc_prod].[dbo].[group_holdover_table]
+						SET source = @source,
+							parent_employergroup_id = @parent_employergroup_id,
+							employergroup_id = @employergroup_id, 
+							employergroup_ud = @employergroup_ud,
+							group_contract_id = @group_contract_id,
+							benefitplan_id = @benefitplan_id, 
+							effective_date =  CAST(@effective_date as DATE),				
+							thru_date = CAST(@thru_date  as DATE),
+							use_received_date = @use_received_date, 
+							use_incurred_date = @use_incurred_date, 
+							comment = @comment, 
+							modified_user = @modified_user,
+							modified_date = getdate()					
+						WHERE
+							group_holdover_table_id = @group_holdover_table_id
+
+						SET @status_message = 'Update record Successful'
+					END		
+			
+
+		ELSE
+
+			BEGIN
+			SET @group_holdover_table_id = -1
+			SET @status_message = 'Duplicate record'
+			return -1
+		END
+
+		
+
+-------------------  performance monitoring code start  ------------------------
+	SET @application_step = 'Complete'
+	SET @key_name = null
+	SET @key_value = null
+	SET @row_count = null
+	SET @step_time = GETDATE()
+	SET @step_duration = DATEDIFF(ms, @previous_step_time, @step_time)
+	SET @previous_step_time = @step_time		
+	SET @total_duration = DATEDIFF(ms, @start_time, @step_time)
+	SET @error_comment = 'There is already an existing record for the entered values'
+	SET @is_error = 0
+	
+	IF @debug = 1	
+		INSERT INTO application_log ( application_name, stored_procedure, application_step, KEY_NAME, key_value, row_count, step_time, step_duration, total_duration, call_stack, comment, is_error, error_message, instance_id )
+		VALUES ( @application_name, @stored_procedure, @application_step, @key_name, @key_value, @row_count, @start_time, @step_duration, @total_duration,null, @error_comment, @is_error, @error_message, @instance_id )
+		
+	-------------------  performance monitoring code end  ------------------------
+
+	--	If we got here we did not encounter any unexpected errors so always return 0 to indicate success.
+	RETURN 0;
+
+
+	END TRY
+
+	BEGIN CATCH
+
+		SET @error_message = 'A database error occurred:'
+			+ CHAR(13) + CHAR(10)
+			+ 'Procedure Name: ' + '[dbo].[group_holdover_sav]'
+			+ CHAR(13) + CHAR(10)
+			+ 'Error Number: ' + CAST(ERROR_NUMBER() AS VARCHAR(30))
+			+ CHAR(13) + CHAR(10)
+			+ 'Error Description: ' + ERROR_MESSAGE()
+			+ CHAR(13) + CHAR(10)
+			+ 'User: ' + SUSER_SNAME()
+		
+
+		;THROW
+	END CATCH
+
+	RETURN 0
+
+END
