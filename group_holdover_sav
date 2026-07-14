@@ -1,4 +1,4 @@
-USE [mcr_dc_prod]
+USE [mcr_dc_prod] Duplicate error should fire when adding a new record or modifying an existing record when all criteria match except on fields "Comment" and "Thru Date".
 GO
 /****** Object:  StoredProcedure [web].[group_holdover_sav]    Script Date: 7/14/2026 9:35:35 AM ******/
 SET ANSI_NULLS ON
