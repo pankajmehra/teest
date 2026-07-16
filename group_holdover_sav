@@ -218,3 +218,423 @@ BEGIN
 	RETURN 0
 
 END
+
+
+Modified Version
+
+/****** Object:  StoredProcedure [web].[group_holdover_sav]    Script Date: 7/14/2026 9:35:35 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+/*****************************************************************************************
+Name:           [web].[group_holdover_sav]
+Description:    Updates a group_holdover record or inserts new if it doesn't exist
+Test harness:   DECLARE @id INT, @msg VARCHAR(255)
+                EXEC [web].[group_holdover_sav]
+                     'source',
+                     652,
+                     16584,
+                     'TEST 456',
+                     NULL,
+                     NULL,
+                     '05/05/2025',
+                     '06/06/2026',
+                     0,
+                     0,
+                     NULL,
+                     4420,
+                     'call stack',
+                     @id OUTPUT,
+                     @msg OUTPUT
+
+Execution time: < 1 second
+Created:        04/17/2026 AJ - US #46007
+Modified:       07/15/2026 - US #47101 - Updated duplicate validation to exclude
+                Comment and Thru Date and to validate both inserts and updates. --47101
+*******************************************************************************************/
+
+ALTER PROCEDURE [web].[group_holdover_sav]
+    @source VARCHAR(255),
+    @parent_employergroup_id INT,
+    @employergroup_id INT,
+    @employergroup_ud VARCHAR(15),
+    @group_contract_id INT,
+    @benefitplan_id INT,
+    @effective_date DATETIME,
+    @thru_date DATETIME,
+    @use_received_date BIT,
+    @use_incurred_date BIT,
+    @comment VARCHAR(255),
+    @p_user_id INT,
+    @p_call_stack VARCHAR(MAX),
+    @group_holdover_table_id INT OUTPUT,
+    @status_message VARCHAR(255) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+
+        ---------------------------------------
+        -- Required Logging for All Procedures
+        ---------------------------------------
+        DECLARE @debug BIT;
+        DECLARE @instance_id UNIQUEIDENTIFIER;
+        DECLARE @application_name VARCHAR(100);
+        DECLARE @stored_procedure NVARCHAR(128);
+        DECLARE @application_step VARCHAR(100);
+        DECLARE @key_name VARCHAR(100);
+        DECLARE @key_value VARCHAR(100);
+        DECLARE @row_count INT;
+        DECLARE @start_time DATETIME;
+        DECLARE @previous_step_time DATETIME;
+        DECLARE @step_time DATETIME;
+        DECLARE @step_duration BIGINT;
+        DECLARE @total_duration BIGINT;
+        DECLARE @error_comment VARCHAR(8000);
+        DECLARE @error_message VARCHAR(8000);
+        DECLARE @is_error BIT;
+
+        DECLARE @created_user VARCHAR(50) =
+        (
+            SELECT DISTINCT
+                   'WEBTPA\' + SU.login_name
+            FROM dbo.sec_user SU
+            WHERE SU.sec_user_id = @p_user_id
+        );
+
+        DECLARE @modified_user VARCHAR(50) =
+        (
+            SELECT DISTINCT
+                   'WEBTPA\' + SU.login_name
+            FROM dbo.sec_user SU
+            WHERE SU.sec_user_id = @p_user_id
+        );
+
+        EXEC sp_set_session_context 'user_name', @created_user;
+        EXEC sp_set_session_context 'user_id', @p_user_id;
+
+        ---------------------------------------
+        -- Initialize Debug Variables
+        ---------------------------------------
+        SET @debug = 1;
+        SET @instance_id = ISNULL(@instance_id, NEWID());
+
+        -- Maintain a call stack for error reporting
+        IF @p_call_stack IS NULL
+            SET @p_call_stack = '';
+        ELSE
+            SET @p_call_stack =
+                @p_call_stack
+                + ' | '
+                + ISNULL(OBJECT_NAME(@@PROCID), 'unknown');
+
+        -- Add parameter list to call stack.
+        SET @p_call_stack =
+            LEFT
+            (
+                @p_call_stack
+                + ' : Parameter List : '
+                + '@p_user_id='
+                + ISNULL(CONVERT(VARCHAR, @p_user_id), 'null'),
+                8000
+            );
+
+        SET @application_name = 'Nexus/Websphere Web Client';
+        SET @stored_procedure = OBJECT_NAME(@@PROCID);
+        SET @start_time = GETDATE();
+        SET @previous_step_time = @start_time;
+
+        SET @application_step = 'Start';
+        SET @key_name = NULL;
+        SET @key_value = NULL;
+        SET @row_count = NULL;
+        SET @step_time = GETDATE();
+        SET @step_duration =
+            DATEDIFF(MILLISECOND, @previous_step_time, @step_time);
+        SET @previous_step_time = @step_time;
+        SET @total_duration =
+            DATEDIFF(MILLISECOND, @start_time, @step_time);
+        SET @error_comment = NULL;
+        SET @is_error = 0;
+
+        IF @debug = 1
+        BEGIN
+            INSERT INTO application_log
+            (
+                application_name,
+                stored_procedure,
+                application_step,
+                key_name,
+                key_value,
+                row_count,
+                step_time,
+                step_duration,
+                total_duration,
+                call_stack,
+                comment,
+                is_error,
+                error_message,
+                instance_id
+            )
+            VALUES
+            (
+                @application_name,
+                @stored_procedure,
+                @application_step,
+                @key_name,
+                @key_value,
+                @row_count,
+                @start_time,
+                @step_duration,
+                @total_duration,
+                NULL,
+                @comment,
+                @is_error,
+                @error_message,
+                @instance_id
+            );
+        END;
+
+        ------------------- performance monitoring code end ------------------------
+
+        SET @source = 'MCRDC';
+
+        DECLARE @existing_records INT; --47101
+
+        ----------------------------------------------------
+        -- Check for duplicates. --47101
+        -- Comment and Thru Date are intentionally excluded --47101
+        -- from the duplicate comparison. --47101
+        -- The current record is excluded during an update. --47101
+        ----------------------------------------------------
+        SELECT
+            @existing_records = COUNT(*) --47101
+        FROM [mcr_dc_prod].[dbo].[group_holdover_table] GHT --47101
+        WHERE GHT.source = @source --47101
+          AND GHT.deleted = 0 --47101
+          AND --47101
+          ( --47101
+              GHT.parent_employergroup_id = @parent_employergroup_id --47101
+              OR --47101
+              ( --47101
+                  GHT.parent_employergroup_id IS NULL --47101
+                  AND @parent_employergroup_id IS NULL --47101
+              ) --47101
+          ) --47101
+          AND --47101
+          ( --47101
+              GHT.employergroup_id = @employergroup_id --47101
+              OR --47101
+              ( --47101
+                  GHT.employergroup_id IS NULL --47101
+                  AND @employergroup_id IS NULL --47101
+              ) --47101
+          ) --47101
+          AND --47101
+          ( --47101
+              GHT.employergroup_ud = @employergroup_ud --47101
+              OR --47101
+              ( --47101
+                  GHT.employergroup_ud IS NULL --47101
+                  AND @employergroup_ud IS NULL --47101
+              ) --47101
+          ) --47101
+          AND --47101
+          ( --47101
+              GHT.group_contract_id = @group_contract_id --47101
+              OR --47101
+              ( --47101
+                  GHT.group_contract_id IS NULL --47101
+                  AND @group_contract_id IS NULL --47101
+              ) --47101
+          ) --47101
+          AND --47101
+          ( --47101
+              GHT.benefitplan_id = @benefitplan_id --47101
+              OR --47101
+              ( --47101
+                  GHT.benefitplan_id IS NULL --47101
+                  AND @benefitplan_id IS NULL --47101
+              ) --47101
+          ) --47101
+          AND GHT.effective_date = CAST(@effective_date AS DATE) --47101
+          AND GHT.use_received_date = @use_received_date --47101
+          AND GHT.use_incurred_date = @use_incurred_date --47101
+          AND --47101
+          ( --47101
+              @group_holdover_table_id IS NULL --47101
+              OR GHT.group_holdover_table_id <> @group_holdover_table_id --47101
+          ); --47101
+
+        ----------------------------------------------------
+        -- Return duplicate error for an insert or update. --47101
+        ----------------------------------------------------
+        IF @existing_records > 0 --47101
+        BEGIN
+            SET @group_holdover_table_id = -1; --47101
+            SET @status_message = 'Duplicate record'; --47101
+            RETURN -1; --47101
+        END; --47101
+
+        ----------------------------------------------------
+        -- Update an existing record. --47101
+        ----------------------------------------------------
+        IF @group_holdover_table_id IS NOT NULL --47101
+           AND EXISTS --47101
+           ( --47101
+               SELECT 1 --47101
+               FROM [mcr_dc_prod].[dbo].[group_holdover_table] --47101
+               WHERE group_holdover_table_id = @group_holdover_table_id --47101
+                 AND deleted = 0 --47101
+           ) --47101
+        BEGIN
+
+            UPDATE [mcr_dc_prod].[dbo].[group_holdover_table]
+            SET source = @source,
+                parent_employergroup_id = @parent_employergroup_id,
+                employergroup_id = @employergroup_id,
+                employergroup_ud = @employergroup_ud,
+                group_contract_id = @group_contract_id,
+                benefitplan_id = @benefitplan_id,
+                effective_date = CAST(@effective_date AS DATE),
+                thru_date = CAST(@thru_date AS DATE),
+                use_received_date = @use_received_date,
+                use_incurred_date = @use_incurred_date,
+                comment = @comment,
+                modified_user = @modified_user,
+                modified_date = GETDATE()
+            WHERE group_holdover_table_id = @group_holdover_table_id;
+
+            SET @status_message = 'Update record Successful';
+
+        END;
+        ELSE --47101
+        BEGIN
+
+            ----------------------------------------------------
+            -- Insert a new record. --47101
+            ----------------------------------------------------
+            INSERT INTO [mcr_dc_prod].[dbo].[group_holdover_table]
+            (
+                [source],
+                [employergroup_id],
+                [employergroup_ud],
+                [group_contract_id],
+                [benefitplan_id],
+                [effective_date],
+                [thru_date],
+                [use_received_date],
+                [use_incurred_date],
+                [comment],
+                [created_date],
+                [created_user],
+                [deleted],
+                [parent_employergroup_id]
+            )
+            VALUES
+            (
+                @source,
+                @employergroup_id,
+                @employergroup_ud,
+                @group_contract_id,
+                @benefitplan_id,
+                CAST(@effective_date AS DATE),
+                CAST(@thru_date AS DATE),
+                @use_received_date,
+                @use_incurred_date,
+                @comment,
+                GETDATE(),
+                @created_user,
+                0,
+                @parent_employergroup_id
+            );
+
+            SET @group_holdover_table_id =
+                CONVERT(INT, SCOPE_IDENTITY()); --47101
+
+            SET @status_message = 'Insert record Successful';
+
+        END;
+
+        ------------------- performance monitoring code start ------------------------
+
+        SET @application_step = 'Complete';
+        SET @key_name = NULL;
+        SET @key_value = NULL;
+        SET @row_count = NULL;
+        SET @step_time = GETDATE();
+        SET @step_duration =
+            DATEDIFF(MILLISECOND, @previous_step_time, @step_time);
+        SET @previous_step_time = @step_time;
+        SET @total_duration =
+            DATEDIFF(MILLISECOND, @start_time, @step_time);
+        SET @error_comment = NULL; --47101
+        SET @is_error = 0;
+
+        IF @debug = 1
+        BEGIN
+            INSERT INTO application_log
+            (
+                application_name,
+                stored_procedure,
+                application_step,
+                key_name,
+                key_value,
+                row_count,
+                step_time,
+                step_duration,
+                total_duration,
+                call_stack,
+                comment,
+                is_error,
+                error_message,
+                instance_id
+            )
+            VALUES
+            (
+                @application_name,
+                @stored_procedure,
+                @application_step,
+                @key_name,
+                @key_value,
+                @row_count,
+                @start_time,
+                @step_duration,
+                @total_duration,
+                NULL,
+                @error_comment,
+                @is_error,
+                @error_message,
+                @instance_id
+            );
+        END;
+
+        ------------------- performance monitoring code end ------------------------
+
+        -- If we got here, we did not encounter any unexpected errors.
+        RETURN 0;
+
+    END TRY
+
+    BEGIN CATCH
+
+        SET @error_message =
+              'A database error occurred:'
+            + CHAR(13) + CHAR(10)
+            + 'Procedure Name: ' + '[web].[group_holdover_sav]' --47101
+            + CHAR(13) + CHAR(10)
+            + 'Error Number: ' + CAST(ERROR_NUMBER() AS VARCHAR(30))
+            + CHAR(13) + CHAR(10)
+            + 'Error Description: ' + ERROR_MESSAGE()
+            + CHAR(13) + CHAR(10)
+            + 'User: ' + SUSER_SNAME();
+
+        THROW;
+
+    END CATCH;
+
+END;
+GO
