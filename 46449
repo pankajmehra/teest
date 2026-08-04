@@ -1,0 +1,22 @@
+FIN | Billing and Rendering Provider NPI inclusion in the payment file
+
+As a finance user I want to ensure that we are presenting the appropriate NPI in relation to the Payee (Vendor) and the rendering provider.
+
+NPI are presented in multiple places within the payment file.
+
+In the 00 or master record there is a designated place for the Payee NPI (Vendor NPI) ordinal 122
+In the 01 record 'Claim non detail' cBillingNPI ordinal 41.10 (Vendor NPI)
+In the 01 record 'Claim non detail' cRenderingPhyscianNPI 41.20 (Rendering physician NPI)
+In the 06 record 'Check'cPayeeNPI ordinal 69 (Vendor NPI)
+
+The claim table stores the vendor NPI and the rendering Physician NPI
+
+Master, Claim non detail, and Check.
+
+
+At this time the payment file is not being updated with the vendor NPI in the master record and Claim non detail is missing both the rendering and the Billing NPI
+
+The File and record layout is included in the attachments along with Sample payment file information
+
+
+
