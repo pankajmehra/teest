@@ -1,3 +1,11 @@
+Summary note for business
+
+In the 01 Claim Non-Detail record, claim.rendering_provider_npi is currently populated into cNationalProviderId, 
+while both dedicated fields, cBillingNPI and cRenderingPhysicianNPI, are blank. The proposed change is to populate
+cBillingNPI from claim.billing_provider_npi and cRenderingPhysicianNPI from claim.rendering_provider_npi. 
+Please confirm whether cNationalProviderId should continue to contain the rendering NPI or should be changed as part of this requirement.
+
+
 USE [mcr_dc_prod]
 GO
 /****** Object:  StoredProcedure [dbo].[check_run_claimnondetail_redcard]    Script Date: 8/3/2026 10:16:47 PM ******/
