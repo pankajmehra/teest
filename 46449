@@ -1,3 +1,6 @@
+The story refers to 'Payee/Vendor NPI' for the 00 Master record and 'Billing NPI' for the 01 Claim Non-Detail record.
+Should both be populated from claim.billing_provider_npi, or is there another Vendor NPI source that should be used?"
+
 FIN | Billing and Rendering Provider NPI inclusion in the payment file
 
 As a finance user I want to ensure that we are presenting the appropriate NPI in relation to the Payee (Vendor) and the rendering provider.
