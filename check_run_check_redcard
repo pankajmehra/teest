@@ -1,3 +1,19 @@
+Here are concise notes you can send to the business analyst or discuss during grooming:
+
+06 Check Record (cPayeeNPI) already appears to be populated from claim.billing_provider_npi.
+Based on the requirement, no additional field mapping appears necessary for this stored procedure if billing_provider_npi is indeed the Vendor/Payee NPI.
+
+Business clarification needed:
+
+The current logic only populates cPayeeNPI when both:
+Vendor Tax ID exists, and
+Billing Provider NPI exists.
+Question: Is it expected that Payee NPI should still be populated when the Vendor Tax ID is blank, provided the Billing/Vendor NPI exists?
+Confirm that claim.billing_provider_npi is the correct source for the Vendor/Payee NPI required in the 06 record.
+The current logic intentionally blanks the Tax ID and NPI for the escheatment vendor (vendor_id = 1337149). Confirm this behavior should remain unchanged.
+
+
+
 USE [mcr_dc_prod]
 GO
 /****** Object:  StoredProcedure [dbo].[check_run_check_redcard]    Script Date: 8/3/2026 10:18:13 PM ******/
