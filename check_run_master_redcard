@@ -1,3 +1,8 @@
+The 00 Master record already contains the cPayeeNPI field, but it is currently blank.
+The proposed mapping is claim.billing_provider_npi. Since one Master record may represent a voucher containing multiple claims, 
+please confirm that all claims on the voucher will have the same billing/vendor NPI. 
+Also confirm whether Payee NPI should remain blank for manual and correspondence records where no claim is available.
+
 USE [mcr_dc_prod]
 GO
 /****** Object:  StoredProcedure [dbo].[check_run_master_redcard]    Script Date: 8/3/2026 10:13:49 PM ******/
