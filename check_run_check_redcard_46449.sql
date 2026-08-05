@@ -1,0 +1,436 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[check_run_check_redcard]    Script Date: 8/3/2026 10:18:13 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[check_run_check_redcard]
+	@check_run_id [INT],
+	@modified_user_id [INT],
+	@voucher_id INT ,
+	@doc_type [CHAR] (5) ,
+	@doc_id  [CHAR] (25) ,
+	@checkbook_check_id INT ,
+	@claim_id INT,
+	@line_number INT OUTPUT,
+	@voucher_payment_id INT,
+	@manual_number INT output 
+
+WITH EXECUTE AS CALLER
+AS
+/** ---------------------------------------------------------------------------------------------------------
+ Called FROM check_run_master_redcard to generate the check record for either an administration, EOB or EOP payment 
+ These are all tab delimited files
+
+ Check Record
+ ----------------------
+ Record Layout details: J:\Documentation\ScrumTeams\Finance\Zelis\Payment File Format Report 20231113.pdf
+ Record Type: 06
+ Record Version: 22
+ Total Length: 3065  
+
+ Modified 08/23/2016 put RTRIMs around check_address(s)
+ Modified 11/27/2017 to put RTRIM around bank name
+ Modified 12/19/2017 modified to pass checkbook_check.payorname and hardcoded ADMINISTERED BY: WebTPA and our address in the
+	                 in the checkdata open check text fields.
+ Modified 01/16/2025 Joe #39265 - add vendor feb tax id and vendor npi to cPayeeTaxID and cPayeeNPI
+ Modified 03/20/2025 AJ  #40202 - add logic to make taxid and npi values blank for escheatment 
+ Modified 07/12/2025 PS  #41959 - updating 06 check record to version 22 
+------------------------------------------------------------------------------------------------------------------*/
+
+BEGIN
+
+	----------------------------------------
+	-- Local Variables
+	----------------------------------------
+	DECLARE @return_status		INT
+    DECLARE @record				CHAR(3065)
+	DECLARE @tab				CHAR = CHAR(9)
+
+	-- Check Information
+    DECLARE @check_number       BIGINT
+    DECLARE @check_date         DATETIME
+    DECLARE @check_amount       MONEY
+    DECLARE @check_name         VARCHAR(50)
+    DECLARE @check_address1     VARCHAR(40)
+    DECLARE @check_address2     VARCHAR(40)
+	DECLARE @check_address3		VARCHAR(40) 
+    DECLARE @check_city         VARCHAR(30)
+    DECLARE @check_state        CHAR(2)
+    DECLARE @check_zip          VARCHAR(15)
+	DECLARE @checkbook_id		INT 
+	DECLARE @payor_name			VARCHAR(30)
+	DECLARE @check_text2		VARCHAR(30)
+	DECLARE @check_text3		VARCHAR(30)
+	DECLARE @check_text4		VARCHAR(30)
+	DECLARE @payee_tax_id		CHAR(9)		-- Joe 01/16/2025
+	DECLARE	@payee_npi			CHAR(10)	-- Joe 01/16/2025
+
+	-- Bank Information 
+	DECLARE @bank_name			VARCHAR(40) 
+	DECLARE @account_number		VARCHAR(50)
+	DECLARE @routing_number		VARCHAR(50)
+
+	-- Manual Check Attachment
+    DECLARE @manual_detail_count           INT
+    DECLARE @attachment_name               VARCHAR(50)
+	DECLARE @check_run_attachment_id       INT
+	DECLARE @manual_ap_entry_attachment_id INT
+
+	-- Manual Check Detail Information
+	DECLARE @manual_ap_entry_id INT
+    DECLARE @invoice_number     VARCHAR(50)
+    DECLARE @detail_amount      MONEY
+    DECLARE @remark             VARCHAR(100)
+
+	-- Error log
+	DECLARE @error_message		VARCHAR(2000)
+	DECLARE @check_date_char	CHAR(8)
+	DECLARE @check_amount_char	CHAR(15)
+	DECLARE @check_number_char	CHAR(16)
+	DECLARE @micr_line			VARCHAR(65)
+	DECLARE @work				INT
+
+
+	------------------------------------
+	-- Get Check Information 
+	------------------------------------
+	SELECT  @check_number = payment_reference, 
+			@check_date = check_date, 
+			@check_amount = amount, 
+			@check_name =RTRIM(LTRIM(name)), 
+			@check_address1 = LTRIM(RTRIM(ISNULL(address1,''))),
+			@check_address2 = ISNULL(address2,''), 
+			@check_city = ISNULL(city,''), 
+			@check_state = ISNULL(state,''), 
+			@check_zip = ISNULL(zip ,''), 
+			@checkbook_id = checkbook_id 
+	FROM checkbook_check WHERE checkbook_check_id = @checkbook_check_id 
+
+
+	-------------------------------------------------------------------------------------------------------
+	-- Overpayment Netting: Update the total check amount by substracting any overpayment transactions 
+	-- created for this provider during serviceline adjustments.  
+	-------------------------------------------------------------------------------------------------------
+	DECLARE @netting_transactions_total_amount MONEY = 0
+
+	SELECT @netting_transactions_total_amount = SUM(adj.overpayment_transaction_amount)
+	FROM 
+		[dbo].[check_run_45_documentadj] adj
+	WHERE 
+		adj.check_run_id = @check_run_id
+		AND adj.voucher_id = @voucher_id
+		AND adj.cDocId = @doc_id
+
+
+	IF @netting_transactions_total_amount > 0
+	BEGIN
+	    -- Update Check Amount
+		SET @check_amount = @check_amount - @netting_transactions_total_amount
+
+		-- Add note to Checkbook Check 
+		INSERT INTO [dbo].[checkbook_check_event] 
+			(checkbook_check_id, checkbook_check_event_type_id, [description], created_user_id, modified_user_id)
+		VALUES
+			(@checkbook_check_id, 4, CONCAT('Actual check amount changed to $: ', @check_amount, 'due to overpayment recovery of: $', @netting_transactions_total_amount), @modified_user_id, @modified_user_id) 
+	END 
+
+
+	------------------------------------
+	-- Format Check Fields 
+	------------------------------------
+	SELECT @check_date_char = CAST(DATEPART(year,@check_date) AS CHAR(4))
+			+ dbo.padr(CAST(DATEPART(month,@check_date) AS VARCHAR(2)) ,'0',2) 
+			+ dbo.padr(CAST(DATEPART(day,@check_date) AS VARCHAR(2)) ,'0',2) 
+
+	SET @check_amount_char = CONVERT(VARCHAR(15),@check_amount )
+	SET @check_number_char = CONVERT(VARCHAR(16),@check_number)
+	
+	------------------------------------
+	-- Get Bank Account Information 
+	------------------------------------
+	SELECT @bank_name = left(ba.name,40),
+		   @account_number = account_number,
+		   @routing_number = routing_number  -- transit number
+	FROM bank_config
+		 INNER JOIN dbo.bank_account ba on bank_config.bank_id = ba.bank_id
+		 INNER JOIN checkbook on checkbook.bank_account_id = ba.bank_account_id
+		 INNER JOIN state on state.state_id = bank_config.state_id
+	WHERE checkbook.checkbook_id = @checkbook_id
+		  AND bank_config.deleted = 0
+		  AND bank_config.start_date <= GETDATE()
+		  AND (bank_config.end_date > GETDATE() OR bank_config.end_date IS NULL)
+
+	-- added following section 12/19/2017
+	SELECT @payor_name = substring(cc.payorname, 1,30) 
+	FROM  checkbook_config cc
+    WHERE cc.start_date <= GETDATE()
+    AND (cc.end_date > GETDATE() or cc.end_date IS NULL)
+    AND cc.deleted = 0 and cc.checkbook_id = @checkbook_id
+
+	SELECT @check_text2 =  'ADMINISTERED BY: WebTPA'
+	SELECT @check_text3 = '6535 State Hwy 161, Suite 100' --46648
+	SELECT @check_text4 =  'Irving, TX 75039'
+	
+	SELECT @work = len(@account_number) - 3 
+	SELECT @micr_line = 'O' + replicate('0', 16-len(RTRIM(@check_number_char))) + RTRIM(@check_number_char)  + 'O' + ' ' 
+		+ 'T' + RTRIM(@routing_number) + 'T' + ' ' + left(@account_number, 3)  + substring(RTRIM(@account_number ),4,@work  ) + 'O'
+
+	DECLARE @vendor_id INT									
+	SELECT @vendor_id = vendor_id FROM voucher WHERE voucher_id = @voucher_id			 -- AJ 03/20/2025
+
+	-----------------------------------------------------
+	-- get payee tax id and payee npi  -- Joe 01/16/2025
+	-----------------------------------------------------
+	SELECT top 1
+		@payee_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''),1,10)
+	,	@payee_tax_id = SUBSTRING(ISNULL(v.tax_id, ''),1,9)
+	FROM claim c
+	INNER JOIN provider_id_map pim on c.provider_id_map_id = pim.provider_id_map_id
+	INNER JOIN vendor v on c.vendor_id = v.vendor_id
+	WHERE c.claim_id = @claim_id
+	AND LEN(v.tax_id) > 0
+	AND LEN(c.billing_provider_npi) > 0	
+	AND @vendor_id <> 1337149
+	--order by c.revision_number desc
+
+
+	
+	
+	-- ============ INSERT FIELDS INTO 06 CHECK RECORD TABLE ============ --
+	DECLARE @checkTable AS [dbo].[check_run_06_check_type]
+	DELETE FROM @checkTable
+	
+	INSERT INTO @checkTable                                                      
+	SELECT                                                                     
+		 '06'	                          -- cRecordType                                             
+	    ,'22'                             -- cRecordVersion	
+	    ,ISNULL(@doc_id, '')              -- cDocId						    
+	    ,''                               -- cFractionOne					    
+	    ,''                               -- cFractionTwo					    
+	    ,''                               -- cFractionThree				    
+	    ,ISNULL(@bank_name, '')           -- cBank1						    
+	    ,''                               -- cBank2						    
+	    ,''                               -- cBank3						    
+	    ,''                               -- cBank4						    
+	    ,''                               -- cBank5						    
+	    ,''                               -- cBank6						    
+	    ,''                               -- cSignature1					    
+	    ,''                               -- cSignature2					    
+	    ,''                               -- cSignature3					    
+	    ,''                               -- cTextAmount					    
+	    ,''                               -- cCheckMessage1				    
+	    ,''                               -- cCheckMessage2				    
+	    ,ISNULL(@micr_line, '')           -- cMicrline					    
+	    ,ISNULL(@check_amount_char, '')   -- cCheckAmount					    
+	    ,''                               -- cBankLogo					    
+	    ,''                               -- cAdminLine1					    
+	    ,''                               -- cAdminLine2					    
+	    ,''                               -- cAdminLine3					    
+	    ,''                               -- cAdminLine4					    
+	    ,''                               -- cAdminLine5					    
+	    ,''                               -- cAdminLine6					    
+	    ,''                               -- cAdminLogo					    
+	    ,ISNULL(@check_name, '')          -- cPayeeName					    
+	    ,ISNULL(@check_address1, '')      -- cPayeeAddress1				    
+	    ,''                               -- cPayeeAddress2				    
+	    ,''                               -- cPayeeAddress3				    
+	    ,ISNULL(@check_city, '')          -- cPayeeCity					    
+	    ,ISNULL(@check_state, '')         -- cPayeeState					    
+	    ,ISNULL(@check_zip, '')           -- cPayeeZip					    
+	    ,ISNULL(@check_date_char, '')     -- cCheckDate					    
+	    ,ISNULL(@check_number_char, '')   -- cCheckNumber					    
+	    ,''                               -- cOrigCheckNumber				    
+	    ,''                               -- cCheckNumberUniqueTagBase	    
+	    ,''                               -- cOriginalCheckNumberFromData	    
+	    ,''                               -- cCheckNumberAfterMicrRule		
+	    ,''                               -- cCheckStartingPosition			
+	    ,''                               -- cCheckData1Label					
+	    ,ISNULL(@payor_name, '')          -- cCheckData1						
+	    ,''                               -- cCheckData2Label					
+	    ,ISNULL(@check_text2, '')         -- cCheckData2						
+	    ,''                               -- cCheckData3Label					
+	    ,ISNULL(@check_text3, '')         -- cCheckData3						
+	    ,''                               -- cCheckData4Label					
+	    ,ISNULL(@check_text4, '')         -- cCheckData4						
+	    ,''                               -- cCheckData5Label					
+	    ,''                               -- cCheckData5						
+	    ,''                               -- cCheckData6Label					
+	    ,''                               -- cCheckData6						
+	    ,''                               -- cOpenField1						
+	    ,''                               -- cOpenField2						
+	    ,''                               -- cOpenField3						
+	    ,''                               -- cOpenField4						
+	    ,''                               -- cOpenField5						
+	    ,''                               -- cIsAch							
+	    ,''                               -- cVoidCheck						
+	    ,''                               -- cErrorHeader						
+	    ,''                               -- cPayeeRoutingNumber				
+	    ,''                               -- cPayeeOnus						
+	    ,''                               -- cAccountType						
+	    ,''                               -- cAddenda							
+	    ,''                               -- cPdfPageNumber					
+	    ,''                               -- cStaleMessage1					
+	    ,''                               -- cStaleMessage2					
+	    ,''                               -- cAccountSetupId					
+	    ,''                               -- cEpayPaymentType					
+	    ,''                               -- cVendorInsertPageCount			
+	    ,''                               -- cCheckHeightMillimeters			
+	    ,''                               -- cEpayVendorInsertType			
+	    ,''                               -- cPayeeNCPDPPharmacyNumber		
+	    ,ISNULL(@payee_npi, '')           -- cPayeeNPI						
+	    ,ISNULL(@payee_tax_id, '')        -- cPayeeTaxID						
+	    ,''                               -- cPayeeSubTaxID					
+	    ,''                               -- cPmtAdjustmentAmount				
+	    ,''                               -- cPmtAdjustmentFiscalEndDate		
+	    ,''                               -- cPmtAdjustmentProviderID			
+	    ,''                               -- cPmtAdjustmentReasonCode			
+	    ,''                               -- cPmtAdjustmentReferenceCode		
+	    ,''                               -- cPaymentType						
+	    ,''                               -- cVendorTransactionId				
+	    ,''                               -- cVendorInsertPageType			
+	    ,''                               -- cNormalizedOnus					
+	    ,''                               -- cNormalizedTransit				
+	    ,''                               -- c835PaymentType					
+	    ,''                               -- cAchPaymentFormat				
+	    ,''                               -- cPayerRouting					
+	    ,''                               -- cPayerAccount					
+	    ,''                               -- cOriginatingCompanyId			
+	    ,''                               -- cOriginatingCompanySuppCode		
+	    ,''                               -- cReassociationId					
+	    ,''                               -- cExistingCheckLocation			
+	    ,''                               -- cNewCheckLocation				
+	    ,''                               -- cNachaStandardEntryClassCode		
+	    ,''                               -- cCombinedCheckSetTotalCount		
+	    ,''                               -- cCombinedCheckSetItemNumber		
+	    ,''                               -- cPayeeCountryCode           		
+
+	
+	SET @record = (SELECT TOP 1
+		cRecordType                            + @tab +
+		cRecordVersion						   + @tab +                           
+		cDocId						           + @tab +
+		cFractionOne						   + @tab +
+		cFractionTwo						   + @tab +
+		cFractionThree				    	   + @tab +
+		cBank1						    	   + @tab +
+		cBank2						    	   + @tab +
+		cBank3						    	   + @tab +
+		cBank4						    	   + @tab +
+		cBank5						    	   + @tab +
+		cBank6						    	   + @tab +
+		cSignature1							   + @tab +
+		cSignature2							   + @tab +
+		cSignature3							   + @tab +
+		cTextAmount							   + @tab +
+		cCheckMessage1				    	   + @tab +
+		cCheckMessage2				    	   + @tab +
+		cMicrline					    	   + @tab +
+		cCheckAmount						   + @tab +
+		cBankLogo					    	   + @tab +
+		cAdminLine1							   + @tab +
+		cAdminLine2							   + @tab +
+		cAdminLine3							   + @tab +
+		cAdminLine4							   + @tab +
+		cAdminLine5							   + @tab +
+		cAdminLine6							   + @tab +
+		cAdminLogo					    	   + @tab +
+		cPayeeName					    	   + @tab +
+		cPayeeAddress1				    	   + @tab +
+		cPayeeAddress2				    	   + @tab +
+		cPayeeAddress3				    	   + @tab +
+		cPayeeCity					    	   + @tab +
+		cPayeeState							   + @tab +
+		cPayeeZip					    	   + @tab +
+		cCheckDate					    	   + @tab +
+		cCheckNumber						   + @tab +
+		cOrigCheckNumber					   + @tab +
+		cCheckNumberUniqueTagBase	    	   + @tab +
+		cOriginalCheckNumberFromData		   + @tab +
+		cCheckNumberAfterMicrRule			   + @tab +
+		cCheckStartingPosition				   + @tab +
+		cCheckData1Label					   + @tab +
+		cCheckData1							   + @tab +
+		cCheckData2Label					   + @tab +
+		cCheckData2							   + @tab +
+		cCheckData3Label					   + @tab +
+		cCheckData3							   + @tab +
+		cCheckData4Label					   + @tab +
+		cCheckData4							   + @tab +
+		cCheckData5Label					   + @tab +
+		cCheckData5							   + @tab +
+		cCheckData6Label					   + @tab +
+		cCheckData6							   + @tab +
+		cOpenField1							   + @tab +
+		cOpenField2							   + @tab +
+		cOpenField3							   + @tab +
+		cOpenField4							   + @tab +
+		cOpenField5							   + @tab +
+		cIsAch								   + @tab +
+		cVoidCheck							   + @tab +
+		cErrorHeader						   + @tab +
+		cPayeeRoutingNumber					   + @tab +
+		cPayeeOnus							   + @tab +
+		cAccountType						   + @tab +
+		cAddenda							   + @tab +
+		cPdfPageNumber						   + @tab +
+		cStaleMessage1						   + @tab +
+		cStaleMessage2						   + @tab +
+		cAccountSetupId						   + @tab +
+		cEpayPaymentType					   + @tab +
+		cVendorInsertPageCount				   + @tab +
+		cCheckHeightMillimeters				   + @tab +
+		cEpayVendorInsertType				   + @tab +
+		cPayeeNCPDPPharmacyNumber			   + @tab +
+		cPayeeNPI							   + @tab +
+		cPayeeTaxID							   + @tab +
+		cPayeeSubTaxID						   + @tab +
+		cPmtAdjustmentAmount				   + @tab +
+		cPmtAdjustmentFiscalEndDate			   + @tab +
+		cPmtAdjustmentProviderID			   + @tab +
+		cPmtAdjustmentReasonCode			   + @tab +
+		cPmtAdjustmentReferenceCode			   + @tab +
+		cPaymentType						   + @tab +
+		cVendorTransactionId				   + @tab +
+		cVendorInsertPageType				   + @tab +
+		cNormalizedOnus						   + @tab +
+		cNormalizedTransit					   + @tab +
+		c835PaymentType						   + @tab +
+		cAchPaymentFormat					   + @tab +
+		cPayerRouting						   + @tab +
+		cPayerAccount						   + @tab +
+		cOriginatingCompanyId				   + @tab +
+		cOriginatingCompanySuppCode			   + @tab +
+		cReassociationId					   + @tab +
+		cExistingCheckLocation				   + @tab +
+		cNewCheckLocation					   + @tab +
+		cNachaStandardEntryClassCode		   + @tab +
+		cCombinedCheckSetTotalCount			   + @tab +
+		cCombinedCheckSetItemNumber			   + @tab +
+		cPayeeCountryCode           		   + @tab 
+	FROM @checkTable
+	)
+
+
+	EXECUTE @return_status = check_run_record_insert_redcard @check_run_id, @line_number OUTPUT, @record, 1, @modified_user_id
+
+	-- Save data fields and check run parameters 
+	EXEC [dbo].[check_run_06_check_log_redcard]
+		 @check_run_id,
+		 @doc_type,   
+		 @doc_id,  
+		 @voucher_id,   
+		 @checkbook_check_id,   
+		 @claim_id,         
+		 @checkTable
+
+
+	IF @return_status <> 0
+	BEGIN
+		SET @error_message = 'An error in check_run_check_redcard.check_run_record_insert_redcard has occured with 128 record: ' + ISNULL(@record,'null')
+		EXEC finance_error_log_insert @error_message, @modified_user_id
+	END	
+		 
+	RETURN @return_status 
+END
