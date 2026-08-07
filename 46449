@@ -1,3 +1,17 @@
+
+SELECT TOP 20
+       claim_id,
+       claim_ud,
+       billing_provider_npi,
+       rendering_provider_npi,
+       vendor_id
+FROM dbo.claim
+WHERE ISNULL(billing_provider_npi, '') <> ''
+  AND ISNULL(rendering_provider_npi, '') <> ''
+  AND billing_provider_npi <> rendering_provider_npi
+ORDER BY claim_id DESC;
+
+
 The story refers to 'Payee/Vendor NPI' for the 00 Master record and 'Billing NPI' for the 01 Claim Non-Detail record.
 Should both be populated from claim.billing_provider_npi, or is there another Vendor NPI source that should be used?"
 
