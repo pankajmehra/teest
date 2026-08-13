@@ -12,3 +12,88 @@ WHERE deleted = 0
 GROUP BY check_run_id, voucher_id, doc_type, doc_id, remark
 HAVING LEN('Line') + (COUNT(line_number) * 6) + LEN(remark) + 2 > 1200
 ORDER BY estimated_total_length DESC
+
+
+
+BEGIN CATCH
+
+    SET @error_message = 'A database error occurred:'
+        + CHAR(13) + CHAR(10)
+        + 'Procedure Name: ' + '[dbo].[group_holdover_sav]'
+        + CHAR(13) + CHAR(10)
+        + 'Error Number: ' + CAST(ERROR_NUMBER() AS VARCHAR(30))
+        + CHAR(13) + CHAR(10)
+        + 'Error Description: ' + ERROR_MESSAGE()
+        + CHAR(13) + CHAR(10)
+        + 'User: ' + SUSER_SNAME()
+
+
+    ---------------------------------------------------------------------
+    -- Log input parameters when save fails --47101
+    ---------------------------------------------------------------------
+    SET @error_comment = --47101
+          '@source=' + ISNULL(@source, 'NULL') --47101
+        + '; @parent_employergroup_id='
+            + ISNULL(CONVERT(VARCHAR(20), @parent_employergroup_id), 'NULL') --47101
+        + '; @employergroup_id='
+            + ISNULL(CONVERT(VARCHAR(20), @employergroup_id), 'NULL') --47101
+        + '; @employergroup_ud='
+            + ISNULL(@employergroup_ud, 'NULL') --47101
+        + '; @group_contract_id='
+            + ISNULL(CONVERT(VARCHAR(20), @group_contract_id), 'NULL') --47101
+        + '; @benefitplan_id='
+            + ISNULL(CONVERT(VARCHAR(20), @benefitplan_id), 'NULL') --47101
+        + '; @effective_date='
+            + ISNULL(CONVERT(VARCHAR(30), @effective_date, 121), 'NULL') --47101
+        + '; @thru_date='
+            + ISNULL(CONVERT(VARCHAR(30), @thru_date, 121), 'NULL') --47101
+        + '; @use_received_date='
+            + ISNULL(CONVERT(VARCHAR(5), @use_received_date), 'NULL') --47101
+        + '; @use_incurred_date='
+            + ISNULL(CONVERT(VARCHAR(5), @use_incurred_date), 'NULL') --47101
+        + '; @comment='
+            + ISNULL(@comment, 'NULL') --47101
+        + '; @p_user_id='
+            + ISNULL(CONVERT(VARCHAR(20), @p_user_id), 'NULL') --47101
+        + '; @group_holdover_table_id='
+            + ISNULL(CONVERT(VARCHAR(20), @group_holdover_table_id), 'NULL'); --47101
+
+
+    INSERT INTO application_log --47101
+    (
+        application_name,
+        stored_procedure,
+        application_step,
+        key_name,
+        key_value,
+        row_count,
+        step_time,
+        step_duration,
+        total_duration,
+        call_stack,
+        comment,
+        is_error,
+        error_message,
+        instance_id
+    )
+    VALUES
+    (
+        @application_name,
+        @stored_procedure,
+        'Save Error', --47101
+        NULL,
+        NULL,
+        NULL,
+        GETDATE(),
+        NULL,
+        NULL,
+        @p_call_stack,
+        @error_comment, --47101
+        1, --47101
+        @error_message,
+        @instance_id
+    ); --47101
+
+
+    ;THROW
+END CATCH
