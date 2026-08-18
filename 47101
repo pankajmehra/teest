@@ -1,4 +1,15 @@
-private void EffectiveDate_TextChanged(
+if (DateTime.TryParse(ViewModel.SearchCriteria.EffectiveDate, out DateTime effectiveDate)
+    && DateTime.TryParse(ViewModel.SearchCriteria.ThruDate, out DateTime thruDate)
+    && effectiveDate > thruDate)
+{
+    MessageBox.Show("Effective Date can't be after Thru Date");
+    return;
+}
+
+
+
+
+privat void EffectiveDate_TextChanged(
     object sender,
     TextChangedEventArgs e)
 {
