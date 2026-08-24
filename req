@@ -1,24 +1,28 @@
-I need to review the EOP process and the paper EOP to determine what is off.
+Description: 
 
-Deliver: Refer to the "Remarks" section in the screenshot below of a paper EOP example
-Determine what the 010 is referring to and if it is needed. 
-Determine where the actual remark code is situated for the two large sections ( those are the lines in the EOB that are being referenced) 
-Determine character limitation to the field in the payment file. 
-In the payment file record 21 data element cRemarkCode Description has a field length of 1200
+ 
 
-aCCEPTANCE CRITERIA
-Lines are not truncated and the appropriate remark code is included as a reference to the line numbers presented.
-private bool HasSearchCriteria()
-{
-    return SelectedParentEmployerGroupUD != null
-        || SelectedEmployerGroupUD != null
-        || SelectedGroupContractUD != null
-        || SelectedBenefitPlanUd != null
-        || !string.IsNullOrWhiteSpace(SearchCriteria.ParentEmployerGroupUd)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.EmployerGroupUd)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.GroupContractUd)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.BenefitPlanUd)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.EffectiveDate)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.ThruDate)
-        || !string.IsNullOrWhiteSpace(SearchCriteria.Comment);
-}
+As the user, I want the system to no longer stop claims with 406 edit when boxes "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim, so that the system can auto adjudicate these types of claims.
+
+ 
+
+Objectives: 
+
+ 
+
+We need to deliver the following:
+
+Remove claims logic that stop claims for 406 edit when the "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim (see screenshots below and in attachment).
+All other logic for the 406 edit will remain in place; we are just removing logic for this one scenario.
+ 
+
+Additional Information:
+
+Claims are auto adjudicated by the system when the "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim.  Claim does NOT stop for 406 edit.
+
+Kassandra Wise
+commented 28m ago
+
+
+@Pankaj Mehra usp_adj_L10_check_for_COB is the appropriate procedure. The eob table includes a field called adj_test_number which is 14 for eob_ud 406. When this proc gets called, it is returning that adj_test_number and the pend status for usp_adj_L20_adjudicate_claim_base to apply the status from the results.
+This procedure is in multiple adjudication streams, but they all work the same way. They call this proc and then assign status from the output of it.
