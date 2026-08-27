@@ -1,0 +1,2612 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[check_run_serviceline_redcard]    Script Date: 8/27/2026 7:28:23 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[check_run_serviceline_redcard]
+    @check_run_id [INT],
+    @modified_user_id [INT],
+    @voucher_id [INT],
+    @claim_id [INT],
+    @claim_ud [VARCHAR](25),
+    @doc_type [CHAR](5),
+    @doc_id [CHAR](25),
+    @suppress_eop BIT,
+    @suppress_eob BIT,
+    @claim_sequence INT OUTPUT,
+    @servicelinesequence INT OUTPUT, -- the serviceline number within the eob/eop 
+    @line_number [INT] OUTPUT,       -- line number in the @record table 
+    @attachment_name VARCHAR(50),
+    @check_run_attachment_id INT,
+    @claim_procedure_attachment_id INT,
+    @suppress_this_claim BIT,
+    @check_run_eob_claim_id INT,
+    @check_run_eop_claim_id INT,
+    @print_accumulators_on_eob BIT,
+    @claim_member_id INT,
+    @benefitplan_id INT,
+    @employergroup_id INT,
+    @checkbook_id INT                -- 07/28/2021
+
+WITH EXECUTE AS CALLER
+AS
+/** ---------------------------------------------------------------------------------------------------------
+     called from check_run_claimnondetail_redcard to generate the serviceline records (the claim procedure detail)
+     remarkcodedescription records (the remarks which print at the bottom of the EOB and EOP
+     These are all tab delimited files
+    
+    Service Line Record
+    ----------------------
+    Record Layout details: J:\Documentation\ScrumTeams\Finance\Zelis\Format Report 001_202506260440182.pdf
+    Record Type: 02
+    Record Version: 47
+    Total Length: 3464 
+
+    we are not going to pass ServiceLine Totals.  RedCard will summarize to get them. 
+    
+    RemarkCodedescription 
+    cRecordType					2	Always 21
+    cRecordVersion				2	Record Type Version 05
+    cDocId						25
+    cRemarkCode					10	Remark Code
+    cRemarkDescription			1000
+    cClaimNumber				25
+    cLineNumber					4	Service Line Number
+    cAmount						15	Remark Code Amount
+    cRemarkDescription2			100	Remark Code Description 2
+    cRemarkCodeType				10	Remark Code Type
+                1202 Total Length
+
+                --------------------------------------------test harness-----------------------------------------------------
+
+                DECLARE @check_run_id [INT];
+DECLARE @modified_user_id [INT];
+DECLARE @voucher_id [INT];
+DECLARE @claim_id [INT];
+DECLARE @claim_ud [VARCHAR](25);
+DECLARE @doc_type [CHAR](5);
+DECLARE @doc_id [CHAR](25);
+DECLARE @suppress_eop BIT;
+DECLARE @suppress_eob BIT;
+DECLARE @claim_sequence INT;
+DECLARE @servicelinesequence INT; -- the serviceline number within the eob/eop 
+DECLARE @line_number INT; -- line number in the @record table 
+DECLARE @attachment_name VARCHAR(50);
+DECLARE @check_run_attachment_id INT;
+DECLARE @claim_procedure_attachment_id INT;
+DECLARE @suppress_this_claim BIT;
+DECLARE @check_run_eob_claim_id INT;
+DECLARE @check_run_eop_claim_id INT;
+DECLARE @print_accumulators_on_eob BIT;
+DECLARE @claim_member_id INT;
+DECLARE @benefitplan_id INT;
+DECLARE @employergroup_id INT;
+DECLARE @checkbook_id INT;
+DECLARE @claim_procedure_id INT;
+DECLARE @reportdate DATE;
+
+set @claim_procedure_id = 201719035    --update this value for testing
+SET @reportdate = CAST(GETDATE() AS DATE);
+
+SELECT @check_run_id = [v].[check_run_id],
+       @voucher_id = [v].[voucher_id],
+       @modified_user_id =
+(
+    SELECT [su].[sec_user_id]
+    FROM [dbo].[sec_user] AS [su]
+    WHERE [su].[login_name] = REPLACE(SUSER_NAME(), 'webtpa\', '')
+),
+       @claim_id = [c].[claim_id],
+       @claim_ud = [c].[claim_ud],
+       @doc_type = 'eop',
+       @doc_id = 'testing_doc',
+       @suppress_eop = 0,
+       @suppress_eob = 0,
+       @claim_sequence = 1,
+       @servicelinesequence = 1,
+       @line_number = 1,
+       @attachment_name = [cra].[attachment_name],
+       @check_run_attachment_id = [cra].[check_run_attachment_id],
+       @claim_procedure_attachment_id = 0, --[cpa].[claim_procedure_attachment_id],
+       @suppress_this_claim = 0,
+       @check_run_eob_claim_id = [crec].[check_run_eob_claim_id],
+       @check_run_eop_claim_id = [crec2].[check_run_eop_claim_id],
+       @print_accumulators_on_eob = 1,
+       @claim_member_id = [c].[member_id],
+       @benefitplan_id = [c].[benefitplan_id],
+       @employergroup_id = [e].[employergroup_id],
+       @checkbook_id = [v].[checkbook_id]
+FROM [dbo].[voucher] AS [v]
+    INNER JOIN [dbo].[voucher_claim_procedure_map] AS [vcpm]
+        ON [vcpm].[voucher_id] = [v].[voucher_id]
+    INNER JOIN [dbo].[claim_procedure] AS [cp]
+        ON [cp].[claim_procedure_id] = [vcpm].[claim_procedure_id]
+    INNER JOIN [dbo].[claim] AS [c]
+        ON [c].[claim_id] = [cp].[claim_id]
+    INNER JOIN [dbo].[eligibility] AS [e]
+        ON [e].[eligibility_id] = [c].[eligibility_id]
+    INNER JOIN [dbo].[check_run_account_header] AS [crah]
+        ON [crah].[check_run_id] = [v].[check_run_id]
+    --INNER JOIN [dbo].[claim_procedure_attachment] AS [cpa]
+    --ON [cpa].[claim_procedure_id] = [cp].[claim_procedure_id]
+    LEFT JOIN [dbo].[check_run_attachment] AS [cra]
+        ON [cra].[check_run_id] = [crah].[check_run_id]
+    LEFT JOIN [dbo].[check_run_eob_claim] AS [crec]
+        ON [crec].[claim_id] = [c].[claim_id]
+    LEFT JOIN [dbo].[check_run_eop_claim] AS [crec2]
+        ON [crec2].[claim_id] = [c].[claim_id]
+WHERE [cp].[claim_procedure_id] = @claim_procedure_id
+      AND [v].[deleted] = 0;
+
+
+EXEC [dbo].[check_run_serviceline_redcard] @check_run_id = @check_run_id,                                   -- int
+                                               @modified_user_id = @modified_user_id,                           -- int
+                                               @voucher_id = @voucher_id,                                       -- int
+                                               @claim_id = @claim_id,                                           -- int
+                                               @claim_ud = @claim_ud,                                           -- varchar(25)
+                                               @doc_type = @doc_type,                                           -- char(5)
+                                               @doc_id = @doc_id,                                               -- char(25)
+                                               @suppress_eop = @suppress_eop,                                   -- bit
+                                               @suppress_eob = @suppress_eob,                                   -- bit
+                                               @claim_sequence = @claim_sequence OUTPUT,                        -- int
+                                               @servicelinesequence = @servicelinesequence OUTPUT,              -- int
+                                               @line_number = @line_number OUTPUT,                              -- int
+                                               @attachment_name = @attachment_name,                             -- varchar(50)
+                                               @check_run_attachment_id = @check_run_attachment_id,             -- int
+                                               @claim_procedure_attachment_id = @claim_procedure_attachment_id, -- int
+                                               @suppress_this_claim = @suppress_this_claim,                     -- bit
+                                               @check_run_eob_claim_id = @check_run_eob_claim_id,               -- int
+                                               @check_run_eop_claim_id = @check_run_eop_claim_id,               -- int
+                                               @print_accumulators_on_eob = @print_accumulators_on_eob,         -- bit
+                                               @claim_member_id = @claim_member_id,                             -- int
+                                               @benefitplan_id = @benefitplan_id,                               -- int
+                                               @employergroup_id = @employergroup_id,                           -- int
+                                               @checkbook_id = @checkbook_id;                                   -- int
+
+SELECT *
+FROM [dbo].[check_run_batch_redcard] AS [crbr]
+WHERE [crbr].[check_run_id] = @check_run_id
+      AND [crbr].[created_date] > @reportdate;
+
+SELECT *
+FROM [dbo].[check_run_redcard_remark] AS [crrr]
+WHERE [crrr].[check_run_id] = @check_run_id
+      AND [crrr].[created_date] > @reportdate;
+
+SELECT TOP 100
+       *
+FROM [dbo].[finance_error_log] AS [fel]
+WHERE [fel].[created_date] > @reportdate
+ORDER BY [fel].[finance_error_log_id] DESC;
+
+
+
+
+    03/09/2017 modified to save doc_id.  It will be what determines which eob remark codes print on the eob 
+    Modified 07/21/2017 we will save and pass 5 new fields medicare_allowed, medicare_write_off ,
+        medicare_paid , medicare_sequester and medicare_penalty
+    08/15/2017 modified join for claim procedure id.  Duplicates were being created
+    03/21/2018 order by claim_procedure id when loading in the claim_procedure table.  I want to have it in the same
+        order as in the 835 table
+    05/29/2018 place of service was causing an error about being truncated
+    08/31/2018 For the medicare eob the member responsibility at the bottom needs an additional amount,
+        sum(claim_procedure_benefit.ineligible) which is the members part of the claim ineligible dollars.
+    09/28/2018 Jesse Create EOB Remarks For External Edits
+    12/18/2018 modified join  to code_type.code_type = 'comp_rbrvs' to match check_run_eop.  It matches more accurately. 
+    12/04/2019 put contract_amount in copenamount field #7.  For nextera capture differently the accums than for anyone else.  
+    12/10/2019 they want the accums which will print on the members health statment to be in the accumulator table instead of as 
+        a remark code 
+    12/26/2019 on the members heal statement they want it to say OUT OF POCKET instead of OUTOFPOCKET 
+    02/05/2020 do a ltrim, rtrim on @procedure_code_ud
+    02/09/2020 Nextera use eob_display name for the accumulator records. 
+    02/12/2020 accumulator records, type 7, must have the accumulator type, caccumulatorType, unique for each one.
+    05/27/2021 Nextera has a new community 51 NextERA PDC Funding.  It is for the direct contracts.  The only way it
+        will process the same as community 50 which is the bcbs community is  the member statements and accumulators 
+    07/28/2021 For Nextera checkbook id 1300 I need to change how the patient responsibility is calculated if the is any coinsurance
+        Typically if there is coinsurance the claims examiner changes the amount of the allowable to be what the coinsurance allowed and covered.
+        In BCBS it is the medicare allowed amount.  Once the allowable amount is changed the amount the member pays is what webtpa processing determined 
+        as the amount to be applied against the deductible.   @deductible + @coinsurance_amount + @copay_amount - @msa_total_used
+        BCBS doesn't want us to change the allowable amount to what medicare allowed.  They want the deductible to be calculated on BCBS allowed 
+        amount.  BCBS pricing is applied before medicare.  The claims examiners updated cob_savings amount and the deductible to be based on BCBS allowed amount.  
+        The net_pay for medicare patient resposibility - net_pay (what webtpa paid) is what the member resposibility is. 
+        Initially I was told  The only way to identify these records is if the cob amounts are populated, 
+        the claim_procedure_benefit.coinsurance_amount <> 0.00. On 08/18/2021 they had me test  claims where sometimes medicare doesn't pay  
+        due to MC Part B DED but we should still use the patient responsibility from claim_procedure_medicare.  So if there is 
+        claim_procedure_medicare records we should apply the rules whether or not medicare actually paid anything. or if there is a cob deducted
+        even if there isn't a medicare line.  In looking at a claim medicare paid more than we allowed, the cob_deducted was populated 
+        but there wasn't a medicare line. 
+    08/19/2021 Flagler checkbook id 1343 and check_run_community_id 55 BCBS Funding will do the same member statements 
+        as Nextera , checkbook id 1300 and check run community 50.  The plan is all of check run community 55 will have
+        the same BCBS member statement. 
+    08/22/2021 in addition to calcualating patient responsibility differentl they do not want the DED, CO-INS, or Co-Pay fields
+        populating on the EOB.  They should always be 0.00
+    09/03/2021 commented out changes for BCBS they want to do more testing.  Went live with flagler
+    09/08/2021 it has been approved for me to go live with bcbs 
+    12/14/2021 all of bcbs will process patient responsibility the same way if there is coninsurance or medicare responsibility 
+    06/13/2022 Mike, Update Recipients, ticket 12032
+    06/17/2022 Mike, Updated Email from Table ticket 12292
+    modified 08/05/2022 by PL adding claim_procedure_external_edit.deleted column condition
+    modified AJ 04/26/2023 19583  Added the condition for remark_code NextEra3  if the denied line has the remark code nextera3 they do not
+        want it to show any patient liability.  It was denied for no authorization.
+    modified 05/24/2023 elva Prudential eop suppression story 19478 checkbook id 1427
+    based on eob codes (3906 suppress eob)(3292 suppress eob, and eop and all correspondence).  check_run_mastercard is 
+    determining this and and setting suppress_eob.  For the eop there can multiple claims so the logic for the 01 records 
+    needs to be looking at @suppress_this_claim and @suppress_eop
+    modified 5/28/2024 sending total HSA amount in field cOtherAmount9
+    modified PS 7/22/2024 Remove ineligible amount from patient_responsibility calculation for LSU checkbook 509
+    modified 01/13/2025 story 38641 by Joe - change procedure code value to 837 service line revenue code when billing type = U
+    modified 01/21/2025 story 38641 by Joe - added the L2400_sv203_line_item_charge_amount <> 0 condition per CCX feedback
+    Modified: 01/23/2025	KDW 	39265   add accumulators communities 60,61,62,63
+    modified 01/24/2025 story 38641 by Joe - changed logic to get revenue code to avoid duplicate records
+    modified 01/27/2025 story 38641 by Joe - changed revenue code to @837_Revenue_Code = ltrim(rtrim(@procedure_code_ud)) for @mi_bill_type = 'U'
+    modified 01/29/2025 story 39208 by Joe - add claim total payment to cPayment field to fix LSU 835 file HSA unbalance issue
+    modified 02/03/2025 story 39208 by Joe - add plan payment to cOtherAmount10 for LSU and others
+    modified 02/27/2025 story 39935 by Joe - added SVC modifier for 835 file
+    modified 03/03/2025 story 39208 by Joe - fixed LSU paid amount with adding LSU condition and claim procedure id
+    modified 03/14/2025 story 39265 by Joe - change revenue code from procedurecode_ud to L2400_sv201_service_line_revenue_code for UB claim
+    modified 03/20/2025 story 40292 by Joe - change cAllowed to contract amount from claim_procedure table
+    Modified 03/25/2025	KDW 	9839   update remarks to include ub service line edits 
+    modified 04/02/2025 story 40502 by Joe - includes all modifiers to 835 file
+    modified 04/24/2025 story 40646 by Joe - changed getting modifier logic: Institutional claims --> do not pass modifier, Professional claims --> pass modifier
+    modified 04/25/2025 story 40646 by Joe - changed revenue code logic to include claim ub92 service to link procedure with 2400 service line
+    modified 08/19/2025	PS 	42006 payment file version and table structure 
+    modified 08/19/2025	KDW 42099 update rev code 
+    modified 12/22/2025	PS  44170 add exception to pass modifier for CCX Institutional claims 
+    modified 04/10/2026	PS  44720 add cClaimnumber to all servicelines, move revenue codes to cRevenueCode, replace cProcedureModifier separator ":" with "," 
+    modified 06/16/2026	KDW 41960 File Accumulator record 07 version update to 14 
+	modified 06/24/2026 PS  46972 including claim reversals for Check Run Community 67 Medica groups (M00004-M00007 only)
+	modified 07/12/2026 PS  47175 Removing benefit ineligible from PR on corrected claims. If PR is $0 replace with empty string
+	modified 07/13/2026 PS  47219 Exclude claim lines with claim_procedure_status_id = 124 (OVPMT STFD) or 125 (OVPMT NET STFD) 
+    modified 07/21/2026 PS  47283 allow claim reversal servicelines for all groups
+--------------------------------------------------------------------------------------------------------------**/
+
+----------------------
+-- Local Variables
+----------------------
+DECLARE @return_status INT;
+DECLARE @record CHAR(3464);
+DECLARE @recordaccum CHAR(1905);
+DECLARE @rectot CHAR(826);
+DECLARE @recremark CHAR(1202);
+DECLARE @tab CHAR;
+DECLARE @fd CHAR;
+DECLARE @fq CHAR;
+DECLARE @zero CHAR(15);
+
+DECLARE @work_amount MONEY; -- elva added 09/02/2011
+DECLARE @work_int INT; -- elva added 09/02/2011
+DECLARE @workfield VARCHAR(6); -- the character counter of docid 
+DECLARE @eob_remark_code_id INT; -- copied from check_run_eop]
+DECLARE @deny_flag BIT; --AJ 05/02/2023
+
+DECLARE @record_count INT;
+DECLARE @record_id INT;
+DECLARE @remark_count INT;
+DECLARE @remark_id INT;
+DECLARE @patient_name VARCHAR(30);
+DECLARE @return INT; --41960
+
+-- Claim Information
+DECLARE @service_from_date DATETIME;
+DECLARE @service_to_date DATETIME;
+DECLARE @patient_number VARCHAR(15);
+DECLARE @provider_id INT;
+DECLARE @provider_ud VARCHAR(35);
+DECLARE @provider_name VARCHAR(71);
+DECLARE @provider_last_name VARCHAR(35);
+DECLARE @provider_first_name VARCHAR(35);
+DECLARE @service_to_date_char VARCHAR(8);
+DECLARE @service_from_date_char VARCHAR(8);
+DECLARE @added_by VARCHAR(100)
+DECLARE @IsClaimNegate BIT
+DECLARE @IsCorrectedClaim BIT
+DECLARE @original_claim_id INT
+DECLARE @claim_file_source_id INT
+
+-- Claim Procedure Information
+DECLARE @claim_procedure_id INT;
+DECLARE @procedure_code_ud VARCHAR(10);
+DECLARE @charges MONEY;
+DECLARE @net_amount MONEY;
+DECLARE @contract_amount MONEY;
+DECLARE @withhold_amount MONEY;
+DECLARE @write_off MONEY;
+DECLARE @cob_deducted MONEY;
+DECLARE @copay_amount MONEY;
+DECLARE @coinsurance_amount MONEY;
+DECLARE @deductible MONEY;
+DECLARE @ineligible_amount MONEY;
+DECLARE @procedure_ineligible_amount MONEY;
+DECLARE @benefit_ineligible_amount MONEY;
+DECLARE @cob_savings_amount MONEY;
+DECLARE @first_claim_procedure BIT;
+DECLARE @plan_pay VARCHAR(3); -- elva 09/02/2011
+DECLARE @checkbook_withhold MONEY; -- elva 06/11/2012
+DECLARE @msa_total_used MONEY; -- elva 12/27/2013
+DECLARE @patient_responsibility MONEY; -- elva 12/27/2013
+DECLARE @member_portion_noncovered MONEY; -- elva 08/31/2018
+DECLARE @place_of_service_ud CHAR(2);
+DECLARE @units CHAR(10);
+DECLARE @837_Revenue_Code VARCHAR(10); -- Joe 01/13/2025
+DECLARE @procedurecode VARCHAR(10); -- Joe 04/25/2025
+
+DECLARE @charges_char CHAR(15);
+DECLARE @net_amount_char CHAR(15);
+DECLARE @contract_amount_char CHAR(15);
+DECLARE @copay_amount_char CHAR(15);
+DECLARE @coinsurance_amount_char CHAR(15);
+DECLARE @deductible_char CHAR(15);
+DECLARE @ineligible_amount_char CHAR(15);
+DECLARE @patient_responsibility_char CHAR(15);
+DECLARE @write_off_char CHAR(15);
+DECLARE @cob_deducted_char CHAR(15);
+DECLARE @msa_total_used_char CHAR(15);
+
+DECLARE @claim_cob_deducted MONEY; -- on eop it is claim_carrier 
+DECLARE @claim_ineligible_amount MONEY;
+DECLARE @claim_charges MONEY;
+DECLARE @claim_net_discount MONEY;
+DECLARE @claim_copay MONEY;
+DECLARE @claim_deductible MONEY;
+DECLARE @claim_net_amount MONEY;
+DECLARE @claim_coinsurance MONEY;
+DECLARE @claim_withhold MONEY;
+DECLARE @claim_msa_paid MONEY; -- elva 12/30/2013
+DECLARE @claim_paid MONEY; -- elva 12/30/2013 was claim_patient_paid 
+DECLARE @claim_patient_responsibility MONEY; -- @deductible + @coinsurance_amount + @copay_amount - @msa_total_used
+DECLARE @claim_write_off MONEY;
+DECLARE @claim_procedure_ineligible_amount MONEY;
+DECLARE @claim_benefit_ineligible_amount MONEY;
+DECLARE @claim_contract_amount MONEY;
+DECLARE @medicare_allowed MONEY; -- elva 07/21/2017
+DECLARE @medicare_write_off MONEY; -- elva 07/21/2017
+DECLARE @medicare_paid MONEY; -- elva 07/21/2017
+DECLARE @medicare_sequester MONEY; -- elva 07/21/2017 
+DECLARE @medicare_penalty MONEY; -- elva 07/21/2017
+DECLARE @claim_member_portion_noncovered MONEY; -- elva 08/31/2018
+
+DECLARE @claim_lsu_amount MONEY; -- Joe 01/29/2025 
+DECLARE @claim_hra_amount MONEY;
+
+DECLARE @claim_charges_char CHAR(15);
+DECLARE @claim_contract_amount_char CHAR(15);
+DECLARE @claim_ineligible_amount_char CHAR(15);
+DECLARE @claim_deductible_char CHAR(15);
+DECLARE @claim_net_amount_char CHAR(15);
+DECLARE @claim_copay_char CHAR(15);
+DECLARE @claim_coinsurance_char CHAR(15);
+DECLARE @claim_cob_deducted_char CHAR(15);
+DECLARE @claim_patient_responsibility_char CHAR(15);
+DECLARE @medicare_allowed_char CHAR(15); -- elva 07/21/2017
+DECLARE @medicare_write_off_char CHAR(15); -- elva 07/21/2017
+DECLARE @medicare_paid_char CHAR(15); -- elva 07/21/2017
+DECLARE @medicare_sequester_char CHAR(15); -- elva 07/21/2017
+DECLARE @medicare_penalty_char CHAR(15); -- elva 07/21/2017
+DECLARE @medicare_patient_responsibility MONEY; -- elva 07/28/2021
+DECLARE @member_portion_noncovered_char CHAR(15); -- elva 08/31/2018
+DECLARE @claim_procedure_medicare INT; -- elva 08/18/2021
+
+DECLARE @mi_bill_type CHAR(1); -- Joe 01/13/2025 
+DECLARE @first_time_revenue_code CHAR(1) = 'Y'; -- Joe 01/24/2025 
+
+DECLARE @claim_lsu_amount_char VARCHAR(15); -- Joe 01/29/2025
+DECLARE @claim_hra_amount_char VARCHAR(15);
+
+DECLARE @svc_modifier VARCHAR(20); -- Joe 02/27/2025 	
+DECLARE @svc_modifier1 VARCHAR(2); -- Joe 04/02/2025
+DECLARE @svc_modifier2 VARCHAR(2);
+DECLARE @svc_modifier3 VARCHAR(2);
+DECLARE @svc_modifier4 VARCHAR(2);
+DECLARE @accumTable AS [dbo].check_run_07_accumulator_type; --41960
+
+
+-- Procedure Code
+DECLARE @procedure_code_nm VARCHAR(30);
+DECLARE @claim_procedure_eob VARCHAR(450);
+
+-- Error log
+DECLARE @error_message VARCHAR(2000) = '';
+
+--------------------------------------------------------------------------------------------------  
+-- EMAIL & LOGGING INFORMATION   
+------------------------------------------------------------------------------------------------  
+DECLARE @user_id INT;
+DECLARE @start INT;
+DECLARE @login_name VARCHAR(50);
+
+SELECT @start = CHARINDEX('\', SUSER_SNAME());
+SELECT @login_name = SUBSTRING(SUSER_SNAME(), @start + 1, LEN(SUSER_SNAME()) - @start);
+SELECT @user_id = [sec_user_id]
+FROM [dbo].[sec_user]
+WHERE [login_name] = @login_name;
+SELECT @user_id = ISNULL(@user_id, 0); --system 
+
+DECLARE @server VARCHAR(50) =
+        (
+            SELECT @@SERVERNAME
+        );
+DECLARE @sp_name VARCHAR(100) =
+        (
+            SELECT OBJECT_NAME(@@PROCID)
+        );
+DECLARE @ProgramName VARCHAR(100) = 'CheckRun_Redcard';
+------------------------------------------------------------------------------------------------------------- 
+
+
+DECLARE @check_run_eop_claim_procedure_id INT;
+DECLARE @check_run_eob_claim_procedure_id INT;
+DECLARE @claim_sequence_char CHAR(6);
+DECLARE @subscriber_id_char CHAR(20);
+DECLARE @servicelinesequence_char CHAR(6);
+DECLARE @claim_line_sequence_char CHAR(3);
+DECLARE @first_time BIT;
+DECLARE @servicelinenumber INT; -- the number of occurrances o f the service line 
+DECLARE @servicelinenumber_char CHAR(3);
+DECLARE @save_claim_procid INT;
+--declare @work_medicare_paid money	-- 07/21/2017
+
+DECLARE @VISIT_TYPE INT;
+
+-- Accumulator EOB table
+DECLARE @member_accum_info TABLE
+(
+    [line_number] VARCHAR(4),
+    [benefit_accum_def_id] INT NOT NULL,
+                                 --		,	benefit_accum_def_ud		VARCHAR(50) NOT NULL
+    [print_on_eob] BIT,
+    [eob_display_name] VARCHAR(200),
+    [benefit_accum_type_id] INT,
+    [carryover_amount] MONEY,
+    [accumulated_amount] MONEY,
+    [flow_amount] MONEY,
+    [seed_amount] MONEY,
+    [total_amount] MONEY,
+    [maximum] MONEY,
+    [period_begin_date] DATETIME,
+    [period_end_date] DATETIME,
+    [member_id] INT NOT NULL,
+    [benefitplan_id] INT,
+    [employergroup_id] INT,
+    [apply_copay] BIT NOT NULL,
+    [apply_coinsurance] BIT NOT NULL,
+    [apply_deductible] BIT NOT NULL,
+    [apply_netpay] BIT NOT NULL,
+    [apply_visits] BIT NOT NULL,
+    [is_individual] BIT NOT NULL -- elva 02/10/2020
+);
+
+-- Accumulator EOB table
+DECLARE @member_accum TABLE
+(
+    [benefit_accum_def_id] INT NOT NULL,
+    [amount] MONEY,
+    [carryover_amount] MONEY,
+    [flow_amount] MONEY,
+    [seed_amount] MONEY,
+    [period_begin_date] DATETIME,
+    [period_end_date] DATETIME,
+    [benefitplan_id] INT,
+    [employergroup_id] INT
+);
+
+CREATE TABLE [#claimprocs]
+(
+    [claimprocs_id] INT IDENTITY NOT NULL,
+    [claim_procedure_id] INT,
+    [procedure_code_ud] VARCHAR(15),
+    [from_service_date] DATETIME,
+    [to_service_date] DATETIME,
+    [charges] MONEY,
+    [contract_amount] MONEY,
+    [write_off] MONEY,
+    [copay_amount] MONEY,
+    [deductible] MONEY,
+    [net_amount] MONEY,
+    [coinsurance_amount] MONEY,
+    [withhold_amount] MONEY,
+    [cob_deducted] MONEY,
+    [ineligible_amount] MONEY,
+    [procedure_ineligible_amount] MONEY,
+    [benefit_ineligible_amount] MONEY,
+    [cob_savings_amount] MONEY,
+    [msa_total_used] MONEY,
+    [checkbook_withhold] MONEY,
+    [place_of_service_ud] CHAR(2),
+    [units] INT,
+    [medicare_allowed] MONEY,                -- elva 07/21/2017
+    [medicare_write_off] MONEY,              -- elva 07/21/2017
+    [medicare_paid] MONEY,                   -- elva 07/21/2017)
+    [medicare_sequester] MONEY,              -- elva 07/21/2017)
+    [medicare_penalty] MONEY,                -- elva 07/21/2017)
+    [medicare_patient_responsibility] MONEY, -- elva 07/28/2021
+    [claim_procedure_medicare] INT
+); -- elva 08/18/2021
+
+CREATE TABLE [#remark_table]
+(
+    [remark_id] INT IDENTITY(1, 1) PRIMARY KEY,
+    [line_number] VARCHAR(4),
+    [remark] VARCHAR(450),
+    [remark_type] VARCHAR(10),
+    [eob_id] INT,
+    [clinical_edit_id] INT
+);
+
+CREATE TABLE [#remark_table_accum]
+(
+    [remark_id] INT IDENTITY(1, 1) PRIMARY KEY,
+    [line_number] VARCHAR(4),
+    [remark] VARCHAR(450),
+    [remark_type] VARCHAR(10),
+    [eob_id] INT,
+    [clinical_edit_id] INT,
+);
+
+
+
+------ added for Nextera Health benefit  the accums for deductable and out of pocket elva 02/09/2020
+CREATE TABLE [#healthplan_accum]
+(
+    [healthplan_accum_id] INT IDENTITY(1, 1) PRIMARY KEY,
+    [eob_display_name] VARCHAR(80),
+    [is_individual] BIT,
+    [used] MONEY,
+    [max_allowed] MONEY
+);
+
+DECLARE @remark_description VARCHAR(450);
+DECLARE @remark_type VARCHAR(10);
+DECLARE @used MONEY; -- elva 12/10/2019
+DECLARE @max MONEY; -- elva 12/10/2019
+DECLARE @remain MONEY; -- elva 12/10/2019
+DECLARE @used_char CHAR(15); -- elva 12/10/2019
+DECLARE @max_char CHAR(15); -- elva 12/10/2019
+DECLARE @remain_char CHAR(15); -- elva 12/10/2019
+DECLARE @claimyear CHAR(4); -- elva 12/10/2019
+DECLARE @eob_display_name VARCHAR(80); -- elva 02/09/2020
+DECLARE @max_count INT;
+DECLARE @counter INT;
+DECLARE @check_run_community_id INT; -- elva 12/05/2019
+DECLARE @accum_type INT; -- elva 02/12/2020
+DECLARE @accum_type_char CHAR(10); -- elva 02/12/2020
+DECLARE @vendor_tax_id VARCHAR(20);
+
+-----------------------------------------------
+-- Initialize Variables
+-----------------------------------------------
+SET @return_status = 0;
+SET @fd = ',';
+SET @fq = '"';
+SET @tab = CHAR(9);
+
+SET @claim_cob_deducted = 0;
+SET @claim_ineligible_amount = 0;
+SET @claim_charges = 0;
+SET @claim_net_discount = 0;
+SET @claim_copay = 0;
+SET @claim_deductible = 0;
+SET @claim_net_amount = 0;
+SET @claim_coinsurance = 0;
+SET @claim_withhold = 0;
+SET @claim_msa_paid = 0;
+SET @claim_paid = 0;
+SET @claim_patient_responsibility = 0;
+SET @claim_write_off = 0;
+SET @claim_procedure_ineligible_amount = 0;
+SET @claim_benefit_ineligible_amount = 0;
+SET @claim_contract_amount = 0;
+SET @medicare_allowed = 0; -- elva 07/21/2017
+SET @medicare_write_off = 0; -- elva 07/21/2017
+SET @medicare_paid = 0; -- elva 07/21/2017
+SET @medicare_sequester = 0; -- elva 07/21/2017
+SET @medicare_penalty = 0; -- elva 07/21/2017
+SET @medicare_patient_responsibility = 0; -- elva 07/28/2021
+SET @claim_member_portion_noncovered = 0; -- elva 08/31/2018
+SET @member_portion_noncovered = 0; -- elva 08/31/2018
+
+SET @claim_lsu_amount = 0; -- Joe 01/29/2025
+SET @claim_hra_amount = 0;
+
+SET @first_time = 1;
+SET @first_claim_procedure = 1;
+
+SET @servicelinenumber = 1;
+
+
+-- get initial claim info 
+SET @claim_sequence_char = CONVERT(CHAR(6), @claim_sequence);
+SELECT @claim_sequence_char = REPLICATE('0', 6 - LEN(@claim_sequence_char)) + @claim_sequence_char;
+
+SELECT @added_by = m.added_by, 
+       @claim_file_source_id = m.claim_file_source_id,
+	   @original_claim_id = c.original_claim_id
+FROM [dbo].[claim] c
+	INNER JOIN [dbo].[claim_file_source_map] m ON m.claim_id = c.claim_id
+WHERE c.claim_id = @claim_id
+
+SELECT @IsClaimNegate = CASE WHEN ISNULL(@added_by, '') = 'claim_negate' THEN 1 ELSE 0 END
+SELECT @IsCorrectedClaim = CASE WHEN @original_claim_id IS NOT NULL AND @IsClaimNegate = 0 THEN 1 ELSE 0 END
+
+
+SET @zero = '0.00          ';
+
+BEGIN TRY
+    -- capture the provider name so it can be included on the service line 
+    SELECT @provider_name = LTRIM(ISNULL([provider].[first_name], '') + ' ' + [provider].[last_name])
+    FROM [claim]
+        LEFT JOIN [provider_id_map]
+            ON [provider_id_map].[provider_id_map_id] = [claim].[provider_id_map_id]
+        LEFT JOIN [provider]
+            ON [provider].[provider_id] = [provider_id_map].[provider_id]
+    WHERE [claim].[claim_id] = @claim_id;
+
+    -- capture the check_run_community_id if it is 50 (nextera) special accumulators will be processed
+    SELECT @check_run_community_id = [check_run_community_id]
+    FROM [check_run]
+    WHERE [check_run_id] = @check_run_id; -- elva 12/04/2019
+                                          -----------------------------------------------
+                                          -- Get Claim Procedure Rows
+                                          -----------------------------------------------
+                                          -- turn this into a table and step through versus cursor 
+    INSERT INTO [#claimprocs]
+    (
+        [claim_procedure_id],
+        [procedure_code_ud],
+        [from_service_date],
+        [to_service_date],
+        [charges],
+        [contract_amount],
+        [write_off],
+        [copay_amount],
+        [deductible],
+        [net_amount],
+        [coinsurance_amount],
+        [withhold_amount],
+        [cob_deducted],
+        [ineligible_amount],
+        [procedure_ineligible_amount],
+        [benefit_ineligible_amount],
+        [cob_savings_amount],
+        [msa_total_used],
+        [checkbook_withhold],
+        [place_of_service_ud],
+        [units],
+        [medicare_allowed],                -- elva 07/21/2017
+        [medicare_write_off],
+        [medicare_paid],                   -- elva 07/21/2017 
+        [medicare_sequester],              -- elva 07/21/2017 
+        [medicare_penalty],                -- elva 07/21/2017 
+        [medicare_patient_responsibility], -- elva 07/28/2021
+        [claim_procedure_medicare]
+    )
+    SELECT [cp].[claim_procedure_id],
+           ISNULL([cp].[procedurecode_ud], '') AS [procedure_code_ud],                             -- elva 11/26/2014 it was null
+           [cp].[from_service_date],
+           [cp].[to_service_date],
+           [cp].[charges],
+           [cp].[contract_amount],
+           [cp].[write_off],
+           [cpb].[copay_amount],
+           [cpb].[deductible],
+           [cpb].[net_amount],
+           [cpb].[coinsurance_amount],
+           [cp].[withhold_amount],
+           [cp].[cob_deducted],                                                                    -- cob deducted is coordination of benefits.  We are secondary payer so this is other coverage
+           [ineligible_amount] = COALESCE([cp].[ineligible_amount], 0.00)
+                                 + COALESCE([cpb].[ineligible_amount], 0.00)
+                                 + COALESCE([cpb].[cob_savings_amount], 0.00),
+           [cp].[ineligible_amount],
+           [cpb].[ineligible_amount],
+           [cpb].[cob_savings_amount],
+           [msa_total_used],
+           [cp].[checkbook_withhold],
+           LEFT(ISNULL([pos].[place_of_service_ud], '  '), 2),                                                        -- elva 05/29/2018 
+           [cp].[units],
+           ISNULL([cpm].[approved], 0) AS [medicare_allowed],                              -- medicare_allowed elva 07/21/2017
+           ISNULL([cpm].[charges_exceeding_fee_arrangement], 0) AS [medicare_write_off],   -- elva 07/21/2017
+           ISNULL([cpm].[paid], 0) AS [medicare_paid],                                     -- medicare paid elva 07/21/2017
+           ISNULL([cpm].[sequestration_provider], 0) AS [medicare_sequester],              -- medicare_sequeste elva 07/21/2017
+           ISNULL([cpm].[legislated_regulatory_penalty], 0) AS [medicare_penalty],         -- elva 07/21/2017
+           ISNULL([cpm].[patient_responsibility], 0) AS [medicare_patient_responsibility], -- elva 07/28/2021
+           [cpm].[claim_procedure_medicare]                                                -- elva 08/18/2021
+    FROM 
+		[dbo].[claim_procedure] [cp] 
+		INNER JOIN [dbo].[claim_procedure_status] [cps] ON [cps].[claim_procedure_status_id] = [cp].[claim_procedure_status_id]
+			   AND (    ([cps].show_on_eop = 1 OR [cps].show_on_835 = 1) 
+					OR (@IsClaimNegate = 1 AND [cp].claim_procedure_status_id NOT IN (124, 125))  -- 06/24/2026 46972 Send negates for Medica groups (M00004-M00007) 47219 Exclude OVPMT/NET STFD
+					OR ([cp].claim_procedure_status_id IN (61, 127))                              -- 07/08/2026 46972 Send FADJ Refund/Net Refund for Medica groups (M00004-M00007)
+				   ) 
+			--AND NOT EXISTS (SELECT 1 FROM [claim_procedure_eob] cpe WHERE cpe.claim_procedure_id = [claim_procedure].[claim_procedure_id] AND cpe.eob_id = 1977) --DO NOT SEND FADJOFFSET
+        INNER JOIN [dbo].[voucher_claim_procedure_map] [vcpm] ON [vcpm].[claim_procedure_id] = [cp].[claim_procedure_id]
+				AND [vcpm].[voucher_id] = @voucher_id -- was below place of service and resuled in duplicate lines elva 08/15/2017
+				AND [vcpm].[deleted] = 0              -- was below place of service and resuled in duplicate lines elva 08/15/2017
+        LEFT JOIN [dbo].[place_of_service] [pos] ON [cp].[place_of_service_id] = [pos].[place_of_service_id]
+        LEFT JOIN [dbo].[claim_procedure_medicare] [cpm] ON [cp].[claim_procedure_id] = [cpm].[claim_procedure_id]
+        LEFT JOIN
+        (
+            SELECT [claim_procedure_benefit].[claim_procedure_id] AS [claim_procedure_id],
+                   SUM(COALESCE([claim_procedure_benefit].[copay_amount], 0.00)) AS [copay_amount],
+                   SUM(COALESCE([claim_procedure_benefit].[deductible], 0.00)) AS [deductible],
+                   SUM(COALESCE([claim_procedure_benefit].[coinsurance_amount], 0.00)) AS [coinsurance_amount],
+                   SUM(COALESCE([claim_procedure_benefit].[ineligible_amount], 0.00)) AS [ineligible_amount],
+                   SUM(COALESCE([claim_procedure_benefit].[cob_savings_amount], 0.00)) AS [cob_savings_amount],
+                   SUM(COALESCE([claim_procedure_benefit].[net_amount], 0.00)) AS [net_amount],
+                   SUM(COALESCE([claim_procedure_benefit_msa].[used_total], 0.00)) AS [msa_total_used] -- elva 12/27/2013
+            FROM 
+				[dbo].[claim_procedure]
+                INNER JOIN [dbo].[claim_procedure_benefit] ON [claim_procedure].[claim_procedure_id] = [claim_procedure_benefit].[claim_procedure_id]
+                LEFT OUTER JOIN [dbo].[claim_procedure_benefit_msa] ON [claim_procedure_benefit].[claim_procedure_benefit_id] = [claim_procedure_benefit_msa].[claim_procedure_benefit_id]
+							AND [claim_procedure_benefit_msa].[used_total] > 0 --	3/27/2014	Don't show refunds until we decide it's ok.
+            WHERE 
+				  [claim_procedure].[claim_id] = @claim_id
+                  AND [claim_procedure_benefit].[deleted] = 0
+            GROUP BY 
+				  [claim_procedure_benefit].[claim_procedure_id]
+        ) [cpb]
+            ON [cp].[claim_procedure_id] = [cpb].[claim_procedure_id]
+    WHERE [cp].[claim_id] = @claim_id
+    ORDER BY [cp].[claim_procedure_id]; -- added 03/21/2018
+
+    -- end of selecting data now start processing it
+    -- how many total records do we need to process
+    SELECT @record_count = COUNT(*)
+    FROM [#claimprocs];
+    SELECT @record_id = MIN([#claimprocs].[claimprocs_id])
+    FROM [#claimprocs];
+
+    WHILE @record_id <= @record_count
+    BEGIN
+        SELECT @claim_procedure_id = [claim_procedure_id],
+               @service_from_date = [from_service_date],
+               @service_to_date = [to_service_date],
+               @procedure_code_ud = SUBSTRING([procedure_code_ud], 1, 10),
+               @charges = [charges],
+               @contract_amount = [contract_amount],
+               @net_amount = [net_amount],
+               @withhold_amount = [withhold_amount],
+               @write_off = [write_off],
+               @cob_deducted = [cob_deducted],
+               @copay_amount = [copay_amount],
+               @coinsurance_amount = [coinsurance_amount],
+               @deductible = [deductible],
+               @ineligible_amount = [ineligible_amount],
+               @procedure_ineligible_amount = [procedure_ineligible_amount],
+               @benefit_ineligible_amount = [benefit_ineligible_amount],
+               @cob_savings_amount = [cob_savings_amount],
+               @msa_total_used = [msa_total_used],                                   -- elva 12/27/2013
+               @checkbook_withhold = [checkbook_withhold],
+               @place_of_service_ud = LEFT(ISNULL([place_of_service_ud], '  '), 2),
+               @units = CONVERT(CHAR(10), [units]),
+               @medicare_allowed = [medicare_allowed],
+               @medicare_paid = [medicare_paid],
+               @medicare_sequester = [medicare_sequester],
+               @medicare_penalty = [medicare_penalty],
+               @medicare_write_off = [medicare_write_off],
+               @medicare_patient_responsibility = [medicare_patient_responsibility], -- 07/28/2021
+               @claim_procedure_medicare = [claim_procedure_medicare]                -- 08/18/2021
+        FROM [#claimprocs]
+        WHERE [#claimprocs].[claimprocs_id] = @record_id;
+
+        IF @first_claim_procedure = 1
+        BEGIN
+            SET @save_claim_procid = @claim_procedure_id;
+        END;
+        ELSE
+        BEGIN
+            IF @save_claim_procid <> @claim_procedure_id
+                SET @servicelinenumber = @servicelinenumber + 1;
+            ELSE
+            BEGIN
+                SET @servicelinenumber = 1;
+                SET @save_claim_procid = @claim_procedure_id;
+            END;
+        END;
+
+        SET @service_from_date_char = REPLACE(CONVERT(VARCHAR(20), @service_from_date, 102), '.', '');
+        SET @service_to_date_char = REPLACE(CONVERT(VARCHAR(20), @service_to_date, 102), '.', '');
+        SET @claimyear = SUBSTRING(@service_from_date_char, 1, 4);
+
+        -------------------------------
+        -- Get revenure code from 837
+        -------------------------------
+        IF @first_time_revenue_code = 'Y' -- Joe 01/24/2025
+        BEGIN
+
+            SET @837_Revenue_Code = 'none'; -- Joe 01/13/2025
+            SET @mi_bill_type = 'N';
+            SELECT DISTINCT
+                   @mi_bill_type = [ct].[mi_bill_type]
+            FROM [dbo].[claim] [c]
+                JOIN [dbo].[claim_procedure] [cp]
+                    ON [c].[claim_id] = [cp].[claim_id]
+                JOIN [claim_type] [ct]
+                    ON [ct].[claim_type_id] = [c].[claim_type_id]
+            WHERE [cp].[claim_procedure_id] = @claim_procedure_id;
+
+            IF @mi_bill_type = 'U' -- U is for UB (professional vs Institutional) and H is for HCFA
+            BEGIN
+                --kdw 20250814  changing revenue code to a string
+                IF LEN(@procedure_code_ud) = 4
+                   AND LEFT(@procedure_code_ud, 1) = 'R'
+                BEGIN
+                    SET @837_Revenue_Code = REPLACE(@procedure_code_ud, 'R', '0');
+                END;
+            END;
+            --IF EXISTS (SELECT 1 FROM [dbo].[claim_ub92_service] WHERE claim_procedure_id = @claim_procedure_id)
+            --BEGIN	--if claim_procedure exists in claim ub92 service table
+            --		IF LEN(@procedure_code_ud) = 4 AND LEFT(@procedure_code_ud,1) = 'R'
+
+            --	--SELECT TOP 1
+            --	--	@837_Revenue_Code = SUBSTRING([c2400].[L2400_sv201_service_line_revenue_code], 1, 10) -- Joe 03/14/2025
+            --	--					--@837_Revenue_Code = ltrim(rtrim(cp.procedurecode_ud))		-- Joe 01/27/2025
+            --	--FROM 
+            --	--edee.dbo.[x12_837_2300] AS [x]
+            --	--INNER JOIN [dbo].[claim] AS [c] ON [c].[x12_837_2300_id] = [x].[x12_837_2300_id] 
+            --	--INNER JOIN edee.dbo.[x12_837_2400] AS [c2400] ON [c2400].[x12_837_2300_id] = [c].[x12_837_2300_id]
+            --	--INNER JOIN [dbo].[claim_ub92] AS [cu] ON [cu].[claim_id] = [c].[claim_id]
+            --	--INNER JOIN [dbo].[claim_ub92_service] AS [cus] ON [cus].[claim_ub92_id] = [cu].[claim_ub92_id] AND cus.[row_number] = [c2400].[L2400_lx01_assigned_num] 
+            --	--INNER JOIN [dbo].[claim_procedure] AS [cp] ON [cp].[claim_id] = [c].[claim_id] AND [cus].[claim_procedure_id] = cp.[claim_procedure_id]
+            --	--INNER JOIN [Edee].[dbo].[x12_837_2400_REF] [r] ON [r].[x12_837_2400_id] = [c2400].[x12_837_2400_id]
+            --	--WHERE [c].[claim_id] = @claim_id
+            --	--AND [cp].[claim_procedure_id] = @claim_procedure_id
+            --	--AND [r].[L2400_ref01_code] = '6R'
+            --	--AND LEN([c2400].[L2400_sv201_service_line_revenue_code]) > 0
+            --	--AND [c2400].[L2400_sv203_line_item_charge_amount] IS NOT NULL 
+            --	--ORDER BY [c2400].[x12_837_2400_id] DESC;
+
+
+            --	SELECT TOP 1				-- provided by Kass 04/23/2025
+            --		@837_Revenue_Code = SUBSTRING([cp].[L2400_sv201_service_line_revenue_code], 1, 10)	
+            --	FROM [dbo].[claim] AS [c]
+            --	INNER JOIN [Edee].[dbo].[x12_837_2300] [c2] ON [c2].[x12_837_2300_id] = [c].[x12_837_2300_id]
+            --	INNER JOIN [Edee].[dbo].[x12_837_2400] [cp] ON [c2].[x12_837_2300_id] = [cp].[x12_837_2300_id]
+            --	INNER JOIN [Edee].[dbo].[x12_837_2400_REF] [r] ON [cp].[x12_837_2400_id] = [r].[x12_837_2400_id]
+            --	INNER JOIN [dbo].[claim_ub92] AS [cu] ON [cu].[claim_id] = [c].[claim_id]
+            --	INNER JOIN [dbo].[claim_ub92_service] AS [cus] ON [cus].[claim_ub92_id] = [cu].[claim_ub92_id] AND [cus].[row_number] = [cp].[L2400_lx01_assigned_num]
+            --	INNER JOIN [dbo].[claim_procedure] AS [cp3] ON [cp3].[claim_procedure_id] = [cus].[claim_procedure_id] AND [cp3].[procedurecode_ud] = [cus].[revenue_code]
+            --	WHERE [c].[claim_id] = @claim_id
+            --	AND [r].[L2400_ref01_code] = '6R'
+            --	AND [cus].[claim_procedure_id] = @claim_procedure_id
+            --	ORDER BY [cp].[x12_837_2400_id];
+
+
+
+            --END;
+            --ELSE
+            --BEGIN	--if claim procedure does not exist in claim ub92 service table
+
+            --	--SELECT TOP 1					-- provided by Kass 04/23/2025
+            --	--	@837_Revenue_Code = SUBSTRING([c2400].[L2400_sv201_service_line_revenue_code], 1, 10) -- Joe 03/14/2025
+            --	--				--@837_Revenue_Code = ltrim(rtrim(cp.procedurecode_ud))		-- Joe 01/27/2025
+            --	--FROM 
+            --	--edee.dbo.[x12_837_2300] AS [x]	
+            --	--INNER JOIN [dbo].[claim] AS [c] ON [c].[x12_837_2300_id] = [x].[x12_837_2300_id] 
+            --	--INNER JOIN edee.dbo.[x12_837_2400] AS [c2400] ON [c2400].[x12_837_2300_id] = [c].[x12_837_2300_id]
+            --	--INNER JOIN [dbo].[claim_procedure] AS [cp] ON [cp].[claim_id] = [c].[claim_id] AND [cp].[sequence_number] = [c2400].[L2400_lx01_assigned_num] 
+            --	--INNER JOIN [Edee].[dbo].[x12_837_2400_REF] [r] ON [r].[x12_837_2400_id] = [c2400].[x12_837_2400_id]
+            --	--WHERE [c].[claim_id] = @claim_id
+            --	--AND [cp].[claim_procedure_id] = @claim_procedure_id
+            --	--AND [r].[L2400_ref01_code] = '6R'
+            --	--AND LEN([c2400].[L2400_sv201_service_line_revenue_code]) > 0
+            --	--AND [c2400].[L2400_sv203_line_item_charge_amount] IS NOT NULL
+            --	--ORDER BY [c2400].[x12_837_2400_id] DESC;
+
+            --	select top 1
+            --		@procedurecode = cp.procedurecode_ud
+            --	from mcr_dc_prod.dbo.claim c
+            --	join mcr_dc_prod.dbo.claim_procedure cp on cp.claim_id = c.claim_id 
+            --	join mcr_dc_prod.dbo.claim_type ct on ct.claim_type_id = c.claim_type_id
+            --	where c.claim_id = @claim_id
+            --	and cp.claim_procedure_id = @claim_procedure_id
+            --	and ct.mi_bill_type = 'U'
+            --	order by cp.claim_procedure_id desc
+
+            --	if left(@procedurecode, 1) = 'R' and isnumeric(substring(@procedurecode, 2, len(@procedurecode) - 1)) = 1 
+            --									 and patindex('%[^0-9]%', substring(@procedurecode, 2, len(@procedurecode) - 1)) = 0	-- if the procedure code can be converted to rev code
+            --	begin
+
+            --		select top 1			-- Joe 04/25/2025
+            --			@837_Revenue_Code = substring(s2400.L2400_sv201_service_line_revenue_code, 1, 10)
+            --		from mcr_dc_prod.dbo.claim c	
+            --		join edee.dbo.x12_837_2400 s2400 on s2400.x12_837_2300_id = c.x12_837_2300_id
+            --		join mcr_dc_prod.dbo.claim_procedure cp on cp.claim_id = c.claim_id 
+            --						 --and cp.sequence_number = s2400.L2400_lx01_assigned_num		-- for UB claim, currently there is no mapping between procedure and 2400 besides the claim ub92 service table. 04/25/2025
+            --		join edee.dbo.x12_837_2400_REF r on r.x12_837_2400_id = s2400.x12_837_2400_id
+            --		join mcr_dc_prod.dbo.claim_type ct on ct.claim_type_id = c.claim_type_id
+            --		where c.claim_id = @claim_id
+            --		and cp.claim_procedure_id = @claim_procedure_id
+            --		and substring(s2400.L2400_sv201_service_line_revenue_code, 1, 4) = right(replace(cp.procedurecode_ud, 'R', 0), 4)
+            --		and r.L2400_ref01_code = '6R'
+            --		and ct.mi_bill_type = 'U'
+            --		and s2400.L2400_sv203_line_item_charge_amount is not null
+            --		and len(s2400.L2400_sv201_service_line_revenue_code) > 0
+            --		order by s2400.x12_837_2400_id desc;
+
+            --	end;
+            --	else
+            --	begin
+
+            --		select top 1
+            --			@837_Revenue_Code = substring(s2400.L2400_sv201_service_line_revenue_code, 1, 10)
+            --		from mcr_dc_prod.dbo.claim c	
+            --		join edee.dbo.x12_837_2400 s2400 on s2400.x12_837_2300_id = c.x12_837_2300_id
+            --		join edee.dbo.x12_837_2400_REF r on r.x12_837_2400_id = s2400.x12_837_2400_id
+            --		join mcr_dc_prod.dbo.claim_type ct on ct.claim_type_id = c.claim_type_id
+            --		where c.claim_id = @claim_id
+            --		and r.L2400_ref01_code = '6R'
+            --		and ct.mi_bill_type = 'U'
+            --		and len(s2400.L2400_sv201_service_line_revenue_code) > 0
+            --		and s2400.L2400_sv203_line_item_charge_amount is not null
+            --		order by s2400.x12_837_2400_id desc;
+
+            --	end;
+
+            --END;
+
+            --            --set @837_Revenue_Code = right(replace(@837_Revenue_Code, 'R', '0'), 4);
+            --set @837_Revenue_Code = trim(@837_Revenue_Code) + space(10 - (len(trim(@837_Revenue_Code))));
+
+            --        END;
+            ELSE
+            BEGIN
+
+                SET @837_Revenue_Code = TRIM(@procedure_code_ud) + SPACE(10 - (LEN(TRIM(@procedure_code_ud))));
+
+            END;
+
+        END;
+
+        -----------------------------------------------
+        -- Create Claim Procedure Attachment
+        -----------------------------------------------
+        IF @suppress_eob = 0
+        BEGIN
+            EXEC [claim_procedure_attachment_ins] @claim_procedure_id,
+                                                  1,
+                                                  @attachment_name,
+                                                  @check_run_id,
+                                                  @check_run_attachment_id,
+                                                  @modified_user_id,
+                                                  @claim_procedure_attachment_id OUTPUT;
+
+            IF @@error <> 0
+            BEGIN
+                -- ========== RAISE ERROR: LOG MESSAGE AND SEND EMAIL NOTIFICATION =================================
+                SET @error_message
+                    = CONCAT(
+                                'Fatal Error 1 - An error in check_run_attachment_ins has occured with with attachment_name: ',
+                                ISNULL(@attachment_name, '')
+                            );
+                RAISERROR(@error_message, 16, 1);
+            END;
+        END;
+
+        IF @suppress_eop = 0
+           AND @suppress_this_claim = 0
+        BEGIN
+            EXEC [claim_procedure_attachment_ins] @claim_procedure_id,
+                                                  2,
+                                                  @attachment_name,
+                                                  @check_run_id,
+                                                  @check_run_attachment_id,
+                                                  @modified_user_id,
+                                                  @claim_procedure_attachment_id OUTPUT;
+
+            IF @@error <> 0
+            BEGIN
+                -- ========== RAISE ERROR: LOG MESSAGE AND SEND EMAIL NOTIFICATION =================================
+                SET @error_message
+                    = CONCAT(
+                                'Fatal Error 2 - An error in check_run_attachment_ins has occured with with attachment_name: ',
+                                ISNULL(@attachment_name, '')
+                            );
+                RAISERROR(@error_message, 16, 1);
+            END;
+        END;
+
+        -----------------------------------------------
+        -- Get Procedure percent pay elva 09/02/2011
+        -----------------------------------------------
+        SET @plan_pay = '';
+        SET @work_amount = 0;
+        SET @work_int = 0;
+
+        SELECT @work_amount = SUM(CAST(ISNULL([raw_value], '0') AS MONEY))
+        FROM [claim_adjudication_detail] [cad]
+        WHERE [claim_id] = @claim_id
+              AND [claim_procedure_id] = @claim_procedure_id
+              AND [claim_adjudication_step_id] = 4;
+
+        SELECT @work_int = CAST(@work_amount AS INT);
+
+        SET @plan_pay = LTRIM(RTRIM(CAST(ISNULL(@work_int, 0) AS VARCHAR(3))));
+
+        -----------------------------------------------
+        -- Get Procedure Description
+        -----------------------------------------------
+        SET @procedure_code_nm = 'UNKNOWN PROCEDURE CODE';
+        --SELECT @procedure_code_nm = comp_rbrvs.comp_rbrvs_nm	-- jt 01/16/2006
+        SELECT @procedure_code_nm
+            = LEFT(LTRIM(RTRIM(@procedure_code_ud + '-' + LTRIM(RTRIM([comp_rbrvs].[comp_rbrvs_nm])))), 30)
+        FROM [comp_rbrvs]
+            JOIN [code_type]
+                ON [code_type].[code_type] = 'comp_rbrvs' -- changed join to the same as check_run_eop	elva 12/18/2018
+                                                          --AND code_type.code_type = 'comp_rbrvs'
+                   AND [code_type].[eff_date] <= @service_from_date
+                   AND
+                   (
+                       [code_type].[term_date] > @service_from_date
+                       OR [code_type].[term_date] IS NULL
+                   )
+        WHERE [comp_rbrvs].[comp_rbrvs_ud] = @procedure_code_ud;
+
+
+
+        IF @mi_bill_type = 'U' -- U is for UB (professional vs Institutional) and H is for HCFA
+        BEGIN
+            --kdw 20250814  changing revenue code to a string
+            IF LEN(@procedure_code_ud) = 4
+               AND LEFT(@procedure_code_ud, 1) = 'R'
+            BEGIN
+                SET @procedure_code_ud = REPLACE(@procedure_code_ud, 'R', '0');
+            END;
+        END;
+
+        -- elva combine the two withhold amounts 06/11/2012
+        SELECT @withhold_amount = ISNULL(@withhold_amount, 0) + ISNULL(@checkbook_withhold, 0);
+
+        -- 07/28/2021 added following section 
+        -- we had data to were cob_deducted on claim_procedure benefit had a dollar amount but there 
+        -- was not a line for the claim procedure in claim_procedure_medicare.  I think the logic needs to be
+        -- there has to be a medicare line to make it medicare 
+        -- commented out 09/03/2021 they want to do more testing and we are going live with the changes for Flagler put back in 09/08/2021
+        -- all of  bcbs, so flagler and nextera will process the same way if there was coinsurance. 
+        -- so instead of checkbook id use community id
+        IF @check_run_community_id IN ( 50, 55 ) -- nextera or bcbs was if @checkbook_id = 1300	elva 12/14/2021
+           AND
+           (
+               ISNULL(@cob_deducted, 0) <> 0
+               OR -- rules only apply to nexter checkbook which have a other insurance has paid elva 04/15/2021
+               ISNULL(@claim_procedure_medicare, 0) <> 0
+           ) -- as of 08/18/2021 due to med part b medicare might not pay but if the medicare_claim_procedure record exist use the information
+        BEGIN
+            SET @copay_amount = 0.00; -- 08/22/2021
+            SET @coinsurance_amount = 0.00; -- 08/22/2021
+            SET @deductible = 0.00; -- 08/22/2021
+            IF @medicare_patient_responsibility <> 0.00
+                SET @patient_responsibility = @medicare_patient_responsibility - @net_amount;
+            ELSE
+                SET @patient_responsibility = 0.00; -- if the medicare patient resposibility is 0 the patient responsibility is 0.00
+        END;
+        ELSE IF (@employergroup_id = 5132 AND @checkbook_id = 509) -- PS 7/22/2024 Remove ineligible amount from calculation for LSU checkbook 509
+        BEGIN
+            SET @patient_responsibility
+                = ISNULL(@deductible, 0) + ISNULL(@coinsurance_amount, 0) + ISNULL(@copay_amount, 0) - ISNULL(@msa_total_used, 0);
+        END;
+		ELSE IF @IsCorrectedClaim = 1 -- 47175 Remove benefit ineligible amount from patient responsibility on corrected claims
+        BEGIN
+            SET @patient_responsibility
+                = ISNULL(@deductible, 0) + ISNULL(@coinsurance_amount, 0) + ISNULL(@copay_amount, 0) - ISNULL(@msa_total_used, 0);
+        END;
+		ELSE IF @IsClaimNegate = 1    -- 47175 Remove benefit ineligible amount from patient responsibility on claim reversals
+        BEGIN
+            SET @patient_responsibility = 0
+        END;
+        ELSE
+            SET @patient_responsibility
+                = (ISNULL(@deductible, 0) + ISNULL(@coinsurance_amount, 0) + ISNULL(@copay_amount, 0))
+                  - ISNULL(@msa_total_used, 0) + ISNULL(@benefit_ineligible_amount, 0); -- elva 09/02/2018
+
+
+        -- nextera AJ 04/26/2023  if the line is denied with eob_id 3541 there is no patient responsibility - it was denied for no authorization
+        IF @check_run_community_id = 50
+        BEGIN
+            IF EXISTS
+            (
+                SELECT [cp].[claim_procedure_id],
+                       [cps].[status_type]
+                FROM [claim_procedure] [cp]
+                    INNER JOIN [claim_procedure_status] [cps]
+                        ON [cp].[claim_procedure_status_id] = [cps].[claim_procedure_status_id]
+                WHERE [claim_procedure_id] = @claim_procedure_id
+                      AND [cps].[status_type] = 'DENY'
+            )
+                SET @deny_flag = 1;
+            ELSE
+                SET @deny_flag = 0;
+
+            IF @deny_flag = 1
+               AND EXISTS
+                   (
+                       SELECT [eob_id]
+                       FROM [claim_procedure_eob]
+                       WHERE [claim_procedure_id] = @claim_procedure_id
+                             AND [eob_id] = 3541
+                   )
+            BEGIN
+                SET @copay_amount = 0.00;
+                SET @coinsurance_amount = 0.00;
+                SET @deductible = 0.00;
+                --if @medicare_patient_responsibility <> 0.00   
+                SET @patient_responsibility = 0.00;
+            END;
+
+        END;
+
+        SET @member_portion_noncovered = ISNULL(@benefit_ineligible_amount, 0); -- elva 08/31/2018
+                                                                                -- start the service line record 
+        IF (
+               @suppress_eob = 0
+               AND @doc_type = 'EOB'
+           )
+           OR
+           (
+               @suppress_eop = 0
+               AND @suppress_this_claim = 0
+               AND @doc_type = 'EOP'
+           )
+        BEGIN
+            SET @charges_char = CONVERT(VARCHAR(15), ISNULL(@charges, 0));
+            SET @net_amount_char = CONVERT(VARCHAR(15), ISNULL(@net_amount, 0));
+            SET @contract_amount_char = CONVERT(VARCHAR(15), ISNULL(@contract_amount, 0));
+            SET @copay_amount_char = CONVERT(VARCHAR(15), ISNULL(@copay_amount, 0));
+            SET @coinsurance_amount_char = CONVERT(VARCHAR(15), ISNULL(@coinsurance_amount, 0));
+            SET @deductible_char = CONVERT(VARCHAR(15), ISNULL(@deductible, 0));
+            SET @ineligible_amount_char = CONVERT(VARCHAR(15), ISNULL(@ineligible_amount, 0));
+            SET @patient_responsibility_char = CONVERT(VARCHAR(15), ISNULL(@patient_responsibility, 0));
+            SET @member_portion_noncovered_char = CONVERT(VARCHAR(15), ISNULL(@member_portion_noncovered, 0)); -- 08/31/2018
+            SET @write_off_char = CONVERT(VARCHAR(15), ISNULL(@write_off, 0));
+            SET @cob_deducted_char = CONVERT(VARCHAR(15), ISNULL(@cob_deducted, 0));
+            SET @medicare_allowed_char = CONVERT(VARCHAR(15), ISNULL(@medicare_allowed, 0)); -- 07/21/2017
+            SET @medicare_write_off_char = CONVERT(VARCHAR(15), ISNULL(@medicare_write_off, 0)); -- 07/21/2017
+            SET @medicare_paid_char = CONVERT(VARCHAR(15), ISNULL(@medicare_paid, 0)); -- 07/21/2017
+            SET @medicare_sequester_char = CONVERT(VARCHAR(15), ISNULL(@medicare_sequester, 0)); -- 07/21/2017
+            SET @medicare_penalty_char = CONVERT(VARCHAR(15), ISNULL(@medicare_penalty, 0)); -- 07/21/2017
+            SET @msa_total_used_char = CONVERT(VARCHAR(15), ISNULL(@msa_total_used, 0));
+			IF @patient_responsibility = 0 SET @patient_responsibility_char = '' -- 47175 7/13/2026
+
+            -- Get Vendor's Tax ID 
+            SELECT @vendor_tax_id = [ve].[tax_id]
+            FROM [dbo].[voucher] [v]
+                INNER JOIN [dbo].[vendor] [ve]
+                    ON [ve].[vendor_id] = [v].[vendor_id]
+            WHERE [v].[voucher_id] = @voucher_id;
+
+            ------------------------------------------
+            -- get professional claim svc modifiers
+            ------------------------------------------
+            SET @svc_modifier = 'none'; -- Joe 02/27/2025
+            SELECT TOP 1
+                   @svc_modifier1 = SUBSTRING(TRIM([cp].[modifier_1]), 1, 2), -- Joe 04/02/2025
+                   @svc_modifier2 = SUBSTRING(TRIM([cp].[modifier_2]), 1, 2),
+                   @svc_modifier3 = SUBSTRING(TRIM([cp].[modifier_3]), 1, 2),
+                   @svc_modifier4 = SUBSTRING(TRIM([cp].[modifier_4]), 1, 2)
+            FROM [dbo].[claim] [c]
+                JOIN [dbo].[claim_procedure] [cp]
+                    ON [cp].[claim_id] = [c].[claim_id]
+                JOIN [dbo].[claim_type] [ct]
+                    ON [ct].[claim_type_id] = [c].[claim_type_id]
+            WHERE [c].[claim_id] = @claim_id
+                  AND [cp].[claim_procedure_id] = @claim_procedure_id
+                  AND
+                  (
+                      [ct].[mi_bill_type] <> 'U' -- only pass modifier for professional claim, not institutional claim
+                      OR @vendor_tax_id = '113454103'
+                  ) -- allow passing modifier for CCX institutional claims 
+            ORDER BY [c].[claim_id] DESC;
+
+            SET @svc_modifier
+                = CONCAT_WS(
+                               ',', -- 04/10/2026 use "," as reparator 44720
+                               NULLIF(@svc_modifier1, ''),
+                               NULLIF(@svc_modifier2, ''),
+                               NULLIF(@svc_modifier3, ''),
+                               NULLIF(@svc_modifier4, '')
+                           );
+            SET @svc_modifier = @svc_modifier + SPACE(20 - LEN(@svc_modifier));
+
+            ----------------------------------
+            --- get HRA amount for LSU claim
+            ----------------------------------
+            IF (@employergroup_id = 5132) -- Joe 03/03/2025
+            BEGIN
+                SET @claim_hra_amount = 0;
+                SELECT @net_amount = COALESCE([cpb].[net_amount], 0.00),
+                       @claim_hra_amount = COALESCE([cpbm].[used_total], 0.00)
+                FROM [dbo].[claim_procedure_benefit] [cpb]
+                    JOIN [claim_procedure_benefit_msa] [cpbm]
+                        ON [cpb].[claim_procedure_benefit_id] = [cpbm].[claim_procedure_benefit_id]
+                    JOIN [claim_procedure] [cp]
+                        ON [cp].[claim_procedure_id] = [cpb].[claim_procedure_id]
+                WHERE [cp].[claim_id] = @claim_id
+                      AND [cp].[claim_procedure_id] = @claim_procedure_id;
+                --and cpbm.used_total is not null
+
+                SET @claim_lsu_amount_char = CONVERT(VARCHAR(15), ISNULL((@net_amount + @claim_hra_amount), 0)); -- Joe 01/29/2025
+            END;
+
+
+            -- the count of the service lines on the claim procedrue
+            SET @servicelinesequence = @servicelinesequence + 1;
+            SET @servicelinesequence_char = CONVERT(CHAR(6), @servicelinesequence);
+            SELECT @servicelinesequence_char
+                = REPLICATE('0', 6 - LEN(@servicelinesequence_char)) + @servicelinesequence_char;
+
+            -- the line number of the claim procedure benefit detail 
+            SET @servicelinenumber_char = CONVERT(CHAR(3), @servicelinenumber);
+            SELECT @servicelinenumber_char = REPLICATE('0', 3 - LEN(@servicelinenumber_char)) + @servicelinenumber_char;
+
+
+            -- ============ INSERT FIELDS INTO 00 MASTER RECORD TABLE ============ --
+            DECLARE @ServiceLineTable AS [dbo].[check_run_02_serviceline_type];
+            DELETE FROM @ServiceLineTable;
+
+            INSERT INTO @ServiceLineTable
+            SELECT '02',                                        -- cRecordType
+                   '47',                                        -- cRecordVersion
+                   ISNULL(@doc_id, ''),                         -- cDocId							 
+                   ISNULL(@claim_sequence_char, ''),            -- cClaimSequence						 
+                   ISNULL(@claim_ud, ''),                       -- cClaimNumber	04/10/2026 44720						 
+                   ISNULL(@servicelinesequence_char, ''),       -- cServiceLineSequence					 
+                   ISNULL(@servicelinenumber_char, ''),         -- cLineNumber							 
+                   ISNULL(@procedure_code_ud, ''),              -- cTypeofService						 
+                   ISNULL(   CASE
+                                 WHEN @837_Revenue_Code <> 'none'
+                                      AND LEN(@837_Revenue_Code) <> 4 THEN
+                                     @837_Revenue_Code
+                                 ELSE
+                                     ''
+                             END,
+                             ''
+                         ),                                     -- cProcedureCode						 
+                   ISNULL(@place_of_service_ud, ''),            -- cPlaceofService						 
+                   ISNULL(@units, ''),                          -- cUnits								 
+                   ISNULL(@procedure_code_nm, ''),              -- cProcedure							 
+                   ISNULL(@service_from_date_char, ''),         -- cServiceDateStart					 
+                   ISNULL(@service_to_date_char, ''),           -- cServiceDateEnd						 
+                   ISNULL(@charges_char, ''),                   -- cTotalCharge							 
+                   ISNULL(@write_off_char, ''),                 -- cDiscount							 
+                   ISNULL(@ineligible_amount_char, ''),         -- cIneligible							 
+                   '',                                          -- cPended								 
+                   ISNULL(@contract_amount_char, ''),           -- cAllowed								 
+                   '',                                          -- cNotesCode1							 
+                   '',                                          -- cNotesCode2							 
+                   '',                                          -- cNotesCode3							 
+                   ISNULL(@deductible_char, ''),                -- cDeductible							 
+                   ISNULL(@copay_amount_char, ''),              -- cCopay								 
+                   ISNULL(@coinsurance_amount_char, ''),        -- cCoinsurance							 
+                   '',                                          -- cBalance								 
+                   ISNULL(@plan_pay, ''),                       -- cPercent								 
+                   ISNULL(@cob_deducted_char, ''),              -- cOtherCarrier						 
+                   ISNULL(   CASE
+                                 WHEN @employergroup_id = 5132 THEN
+                                     @claim_lsu_amount_char
+                                 ELSE
+                                     @net_amount_char
+                             END,
+                             ''
+                         ),                                     -- cPayment								 
+                   ISNULL(@patient_responsibility_char, ''),    -- cPatientResponsibility				 
+                   '',                                          -- cDescription							 
+                   '',                                          -- cToothNumber							 
+                   '',                                          -- cToothSurface						 
+                   '',                                          -- cPatientAccountNumber				 
+                   '',                                          -- cRXNumber							 
+                   ISNULL(@medicare_allowed_char, ''),          -- cOtherAmount1						 
+                   ISNULL(@medicare_write_off_char, ''),        -- cOtherAmount2						 
+                   ISNULL(@medicare_paid_char, ''),             -- cOtherAmount3						 
+                   ISNULL(@medicare_sequester_char, ''),        -- cOtherAmount4						 
+                   ISNULL(@medicare_penalty_char, ''),          -- cOtherAmount5						 
+                   '',                                          -- cOpenField1							 
+                   '',                                          -- cOpenField2							 
+                   '',                                          -- cOpenField3							 
+                   '',                                          -- cOpenField4							 
+                   '',                                          -- cOpenField5							 
+                   ISNULL(@claim_ud, ''),                       -- cClaimRelationString					 
+                   '',                                          -- cReasonableAndCustomary				 
+                   '',                                          -- cCobAllowed							 
+                   '',                                          -- cPPOContractNumber					 
+                   '',                                          -- cOverReasonableAndCustomary			 
+                   '',                                          -- cNotesCode4							 
+                   '',                                          -- cNotesCode5							 
+                   '',                                          -- cNotesCode1IsPatientReponsibility  	 
+                   '',                                          -- cNotesCode2IsPatientReponsibility	 
+                   '',                                          -- cNotesCode3IsPatientReponsibility	 
+                   '',                                          -- cNotesCode4IsPatientReponsibility	 
+                   '',                                          -- cNotesCode5IsPatientReponsibility	 
+                   '',                                          -- cMedicareAssignment					 
+                   ISNULL(   CASE
+                                 WHEN @svc_modifier IS NOT NULL
+                                      AND @svc_modifier <> 'none'
+                                      AND @svc_modifier <> '' THEN
+                                     @svc_modifier
+                                 ELSE
+                                     ''
+                             END,
+                             ''
+                         ),                                     -- cProcedureModifier					 
+                   '',                                          -- cPenalty								 
+                   '',                                          -- cNotesCode1Type						 
+                   '',                                          -- cNotesCode2Type						 
+                   '',                                          -- cNotesCode3Type						 
+                   '',                                          -- cNotesCode4Type						 
+                   '',                                          -- cNotesCode5Type						 
+                   '',                                          -- cAlternateProcedureCode				 
+                   '',                                          -- cServiceQualifer						 
+                   '',                                          -- cSvcAdjustmentAmount					 
+                   '',                                          -- cSvcAdjustmentGroupCode				 
+                   '',                                          -- cSvcAdjustmentReasonCode				 
+                   '',                                          -- cSvcRARC								 
+                   '',                                          -- cLineItemControlNumber				 
+                   '',                                          -- cOriginalProcedureCode				 
+                   ISNULL(@member_portion_noncovered_char, ''), -- cOtherAmount6						 
+                   ISNULL(@contract_amount_char, ''),           -- cOtherAmount7						 
+                   '',                                          -- cOtherAmount8						 
+                   ISNULL(@msa_total_used_char, ''),            -- cOtherAmount9						 
+                   ISNULL(@net_amount_char, ''),                -- cOtherAmount10						 
+                   '',                                          -- cOtherAmount11						 
+                   '',                                          -- cOtherAmount12						 
+                   '',                                          -- cOtherAmount13						 
+                   '',                                          -- cICDCode								 
+                   '',                                          -- cPaymentProvider						 
+                   '',                                          -- cPaymentEnrollee						 
+                   '',                                          -- cCOBDeductible						 
+                   '',                                          -- cCOBCredit							 
+                   '',                                          -- cDiagnosisCode1						 
+                   '',                                          -- cDiagnosisCode2						 
+                   '',                                          -- cDiagnosisCode3						 
+                   '',                                          -- cDiagnosisCode4						 
+                   '',                                          -- cDiagnosisCode5						 
+                   ISNULL(   CASE
+                                 WHEN @first_claim_procedure = 1 THEN
+                                     @provider_name
+                                 ELSE
+                                     ''
+                             END,
+                             ''
+                         ),                                     -- cProviderName						 
+                   '',                                          -- cOpenField6							 
+                   '',                                          -- cOpenField7							 
+                   '',                                          -- cOpenField8							 
+                   '',                                          -- cOpenField9							 
+                   '',                                          -- cOpenField10							 
+                   '',                                          -- cOtherAmount14						 
+                   '',                                          -- cOtherAmount15						 
+                   '',                                          -- cOtherAmount16						 
+                   '',                                          -- cOtherAmount17						 
+                   '',                                          -- cOtherAmount18						 
+                   '',                                          -- cOtherAmount19						 
+                   '',                                          -- cNetCoveredDiscountAmount			 
+                   '',                                          -- cPPOName	
+                   ISNULL(   CASE
+                                 WHEN @837_Revenue_Code <> 'none'
+                                      AND LEN(@837_Revenue_Code) = 4 THEN
+                                     @837_Revenue_Code
+                                 ELSE
+                                     ''
+                             END,
+                             ''
+                         ),                                     -- cRevenueCode	04/10/2026 44720						 
+                   '',                                          -- cNationalDrugCode					 
+                   '',                                          -- cWithheldAmount						 
+                   '',                                          -- cDoNotSendToPaymentsVendor			 
+                   '',                                          -- cTax									 
+                   '',                                          -- cSubmittedProcedureModifier1			 
+                   '',                                          -- cSubmittedProcedureModifier2			 
+                   '',                                          -- cSubmittedProcedureModifier3			 
+                   '',                                          -- cSubmittedProcedureModifier4			 
+                   '',                                          -- cAdjudicatedProcedureModifier1		 
+                   '',                                          -- cAdjudicatedProcedureModifier2		 
+                   '',                                          -- cAdjudicatedProcedureModifier3		 
+                   '',                                          -- cAdjudicatedProcedureModifier4		 
+                   '',                                          -- cOriginalUnitsService				 
+                   '',                                          -- cPreviouslyPaidAmount				 
+                   '',                                          -- cQualifyingPaymentAmount				 
+                   '',                                          -- cNSAConsentReceived					 
+                   '',                                          -- cClaimRevisionNumber					 
+                   '',                                          -- cOtherAmount20						 
+                   '',                                          -- cOtherAmount21						 
+                   '',                                          -- cOtherAmount22						 
+                   '',                                          -- cOpenField11							 
+                   '',                                          -- cOpenField12							 
+                   '',                                          -- cOpenField13							 
+                   '',                                          -- cQPAWriteOffAmount					 
+                   '',                                          -- cOriginalServiceQualifier			 
+                   '',                                          -- c835HealthCarePolicyID1				 
+                   '',                                          -- c835HealthCarePolicyID2				 
+                   '',                                          -- c835HealthCarePolicyID3				 
+                   '',                                          -- c835HealthCarePolicyID4				 
+                   '',                                          -- c835HealthCarePolicyID5				 
+                   '',                                          -- c835APGNumber						 
+                   '',                                          -- c835AmbulatoryPaymentClassification	 
+                   '',                                          -- cSequestration						 
+                   '',                                          -- cAuthorizationNumber					 
+                   '',                                          -- cPriorAuthorizationNumber			 
+                   '',                                          -- c835AllowedActual					 
+                   '';                                          -- cSplitLineCounter					 
+
+
+            SET @record =
+            (
+                SELECT TOP 1
+                       [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cClaimSequence] + @tab
+                       + [cClaimNumber] + @tab + [cServiceLineSequence] + @tab + [cLineNumber] + @tab + [cTypeofService]
+                       + @tab + [cProcedureCode] + @tab + [cPlaceofService] + @tab + [cUnits] + @tab + [cProcedure] + @tab
+                       + [cServiceDateStart] + @tab + [cServiceDateEnd] + @tab + [cTotalCharge] + @tab + [cDiscount]
+                       + @tab + [cIneligible] + @tab + [cPended] + @tab + [cAllowed] + @tab + [cNotesCode1] + @tab
+                       + [cNotesCode2] + @tab + [cNotesCode3] + @tab + [cDeductible] + @tab + [cCopay] + @tab
+                       + [cCoinsurance] + @tab + [cBalance] + @tab + [cPercent] + @tab + [cOtherCarrier] + @tab
+                       + [cPayment] + @tab + [cPatientResponsibility] + @tab + [cDescription] + @tab + [cToothNumber]
+                       + @tab + [cToothSurface] + @tab + [cPatientAccountNumber] + @tab + [cRXNumber] + @tab
+                       + [cOtherAmount1] + @tab + [cOtherAmount2] + @tab + [cOtherAmount3] + @tab + [cOtherAmount4] + @tab
+                       + [cOtherAmount5] + @tab + [cOpenField1] + @tab + [cOpenField2] + @tab + [cOpenField3] + @tab
+                       + [cOpenField4] + @tab + [cOpenField5] + @tab + [cClaimRelationString] + @tab
+                       + [cReasonableAndCustomary] + @tab + [cCobAllowed] + @tab + [cPPOContractNumber] + @tab
+                       + [cOverReasonableAndCustomary] + @tab + [cNotesCode4] + @tab + [cNotesCode5] + @tab
+                       + [cNotesCode1IsPatientReponsibility] + @tab + [cNotesCode2IsPatientReponsibility] + @tab
+                       + [cNotesCode3IsPatientReponsibility] + @tab + [cNotesCode4IsPatientReponsibility] + @tab
+                       + [cNotesCode5IsPatientReponsibility] + @tab + [cMedicareAssignment] + @tab + [cProcedureModifier]
+                       + @tab + [cPenalty] + @tab + [cNotesCode1Type] + @tab + [cNotesCode2Type] + @tab
+                       + [cNotesCode3Type] + @tab + [cNotesCode4Type] + @tab + [cNotesCode5Type] + @tab
+                       + [cAlternateProcedureCode] + @tab + [cServiceQualifer] + @tab + [cSvcAdjustmentAmount] + @tab
+                       + [cSvcAdjustmentGroupCode] + @tab + [cSvcAdjustmentReasonCode] + @tab + [cSvcRARC] + @tab
+                       + [cLineItemControlNumber] + @tab + [cOriginalProcedureCode] + @tab + [cOtherAmount6] + @tab
+                       + [cOtherAmount7] + @tab + [cOtherAmount8] + @tab + [cOtherAmount9] + @tab + [cOtherAmount10]
+                       + @tab + [cOtherAmount11] + @tab + [cOtherAmount12] + @tab + [cOtherAmount13] + @tab + [cICDCode]
+                       + @tab + [cPaymentProvider] + @tab + [cPaymentEnrollee] + @tab + [cCOBDeductible] + @tab
+                       + [cCOBCredit] + @tab + [cDiagnosisCode1] + @tab + [cDiagnosisCode2] + @tab + [cDiagnosisCode3]
+                       + @tab + [cDiagnosisCode4] + @tab + [cDiagnosisCode5] + @tab + [cProviderName] + @tab
+                       + [cOpenField6] + @tab + [cOpenField7] + @tab + [cOpenField8] + @tab + [cOpenField9] + @tab
+                       + [cOpenField10] + @tab + [cOtherAmount14] + @tab + [cOtherAmount15] + @tab + [cOtherAmount16]
+                       + @tab + [cOtherAmount17] + @tab + [cOtherAmount18] + @tab + [cOtherAmount19] + @tab
+                       + [cNetCoveredDiscountAmount] + @tab + [cPPOName] + @tab + [cRevenueCode] + @tab
+                       + [cNationalDrugCode] + @tab + [cWithheldAmount] + @tab + [cDoNotSendToPaymentsVendor] + @tab
+                       + [cTax] + @tab + [cSubmittedProcedureModifier1] + @tab + [cSubmittedProcedureModifier2] + @tab
+                       + [cSubmittedProcedureModifier3] + @tab + [cSubmittedProcedureModifier4] + @tab
+                       + [cAdjudicatedProcedureModifier1] + @tab + [cAdjudicatedProcedureModifier2] + @tab
+                       + [cAdjudicatedProcedureModifier3] + @tab + [cAdjudicatedProcedureModifier4] + @tab
+                       + [cOriginalUnitsService] + @tab + [cPreviouslyPaidAmount] + @tab + [cQualifyingPaymentAmount]
+                       + @tab + [cNSAConsentReceived] + @tab + [cClaimRevisionNumber] + @tab + [cOtherAmount20] + @tab
+                       + [cOtherAmount21] + @tab + [cOtherAmount22] + @tab + [cOpenField11] + @tab + [cOpenField12] + @tab
+                       + [cOpenField13] + @tab + [cQPAWriteOffAmount] + @tab + [cOriginalServiceQualifier] + @tab
+                       + [c835HealthCarePolicyID1] + @tab + [c835HealthCarePolicyID2] + @tab + [c835HealthCarePolicyID3]
+                       + @tab + [c835HealthCarePolicyID4] + @tab + [c835HealthCarePolicyID5] + @tab + [c835APGNumber]
+                       + @tab + [c835AmbulatoryPaymentClassification] + @tab + [cSequestration] + @tab
+                       + [cAuthorizationNumber] + @tab + [cPriorAuthorizationNumber] + @tab + [c835AllowedActual] + @tab
+                       + [cSplitLineCounter] + @tab
+                FROM @ServiceLineTable
+            );
+
+
+            -- Save data fields and check run parameters 
+            EXEC [dbo].[check_run_02_serviceline_log_redcard] @check_run_id,
+                                                              @voucher_id,
+                                                              @claim_id,
+                                                              @claim_ud,
+                                                              @doc_type,
+                                                              @doc_id,
+                                                              @suppress_eop,
+                                                              @suppress_eob,
+                                                              @attachment_name,
+                                                              @check_run_attachment_id,
+                                                              @claim_procedure_attachment_id,
+                                                              @suppress_this_claim,
+                                                              @check_run_eob_claim_id,
+                                                              @check_run_eop_claim_id,
+                                                              @print_accumulators_on_eob,
+                                                              @claim_member_id,
+                                                              @benefitplan_id,
+                                                              @employergroup_id,
+                                                              @checkbook_id,
+                                                              @ServiceLineTable;
+
+            EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                    @line_number OUTPUT,
+                                                                    @record,
+                                                                    1,
+                                                                    @modified_user_id;
+            IF @return_status <> 0
+            BEGIN
+                -- ========== RAISE ERROR: LOG MESSAGE AND SEND EMAIL NOTIFICATION =================================
+                SET @error_message
+                    = CONCAT(
+                                'Fatal Error 3 - An error in check_run_record_insert_redcard has occured with servicelinerecord: ',
+                                ISNULL(@record, 'null') + ' : claim_id : ' + ISNULL(@claim_id, 0)
+                            );
+                RAISERROR(@error_message, 16, 1);
+            END;
+
+            SET @claim_cob_deducted = @claim_cob_deducted + ISNULL(@cob_deducted, 0);
+            SET @claim_ineligible_amount = @claim_ineligible_amount + ISNULL(@ineligible_amount, 0);
+            SET @claim_charges = @claim_charges + ISNULL(@charges, 0);
+            SET @claim_net_discount = @claim_net_discount + ISNULL(@write_off, 0);
+            SET @claim_procedure_ineligible_amount
+                = @claim_procedure_ineligible_amount + ISNULL(@procedure_ineligible_amount, 0);
+            SET @claim_copay = @claim_copay + @copay_amount;
+            SET @claim_deductible = @claim_deductible + @deductible;
+            SET @claim_net_amount = @claim_net_amount + ISNULL(@net_amount, 0);
+            SET @claim_coinsurance = @claim_coinsurance + ISNULL(@coinsurance_amount, 0);
+            SET @claim_withhold = @claim_withhold + ISNULL(@withhold_amount, 0);
+            SET @claim_msa_paid = @claim_msa_paid + @msa_total_used;
+            SET @claim_paid = @claim_paid + ISNULL(@net_amount, 0) + @msa_total_used;
+            SET @claim_patient_responsibility = @claim_patient_responsibility + ISNULL(@patient_responsibility, 0);
+            SET @claim_write_off = @claim_write_off + ISNULL(@write_off, 0);
+            SET @claim_contract_amount = @claim_contract_amount + ISNULL(@contract_amount, 0);
+            SET @claim_member_portion_noncovered
+                = @claim_member_portion_noncovered + ISNULL(@member_portion_noncovered, 0); -- elva 08/31/2018
+
+
+        END;
+
+        IF @doc_type = 'EOB'
+        BEGIN
+
+            -----------------------------------------------
+            -- Create check_run_eob_claim record
+            -----------------------------------------------
+
+            INSERT INTO [check_run_eob_claim_procedure]
+            (
+                [check_run_eob_claim_id],
+                [claim_procedure_id],
+                [from_service_date],
+                [to_service_date],
+                [procedurecode_ud],
+                [procedurecode_nm],
+                [charges],
+                [write_off],
+                [procedure_ineligible_amount],
+                [benefit_ineligible_amount],
+                [cob_savings_amount],
+                [cob_deducted],
+                [withhold_amount],
+                [copay_amount],
+                [deductible],
+                [coinsurance_amount],
+                [net_amount],
+                [msa_paid],                        -- elva 12/27/2013
+                [patient_responsibility],          -- elva 12/27/2013
+                [medicare_allowed],                -- elva 07/21/2017
+                [medicare_write_off],              -- elva 07/21/2017
+                [medicare_paid],                   -- elva 07/21/2017
+                [medicare_sequester],              -- elva 07/21/2017
+                [medicare_penalty],                -- elva 07/21/2017
+                [medicare_patient_responsibility], -- elva 07/28/2021
+                [created_user_id],
+                [modified_user_id]
+            )
+            SELECT @check_run_eob_claim_id,
+                   @claim_procedure_id,
+                   CONVERT(SMALLDATETIME, @service_from_date),
+                   CONVERT(SMALLDATETIME, @service_to_date),
+                   @procedure_code_ud,
+                   @procedure_code_nm,
+                   ISNULL(@charges, 0),
+                   ISNULL(@write_off, 0),
+                   ISNULL(@procedure_ineligible_amount, 0),
+                   ISNULL(@benefit_ineligible_amount, 0),
+                   ISNULL(@cob_savings_amount, 0),
+                   ISNULL(@cob_deducted, 0),
+                   ISNULL(@withhold_amount, 0),
+                   ISNULL(@copay_amount, 0),
+                   ISNULL(@deductible, 0),
+                   ISNULL(@coinsurance_amount, 0),
+                   ISNULL(@net_amount, 0),
+                   ISNULL(@msa_total_used, 0),                  -- elva 12/27/2013
+                   ISNULL(@patient_responsibility, 0),          -- elva 12/27/2013
+                   ISNULL(@medicare_allowed, 0),                -- elva 07/21/2017
+                   ISNULL(@medicare_write_off, 0),              -- elva 07/21/2017	
+                   ISNULL(@medicare_paid, 0),                   -- elva 07/21/2017
+                   ISNULL(@medicare_sequester, 0),              -- elva 07/21/2017
+                   ISNULL(@medicare_penalty, 0),                -- elva 07/21/2017
+                   ISNULL(@medicare_patient_responsibility, 0), -- elva 07/28/2021
+                   @modified_user_id,
+                   @modified_user_id;
+
+            SET @check_run_eob_claim_procedure_id = SCOPE_IDENTITY();
+        END;
+        IF @doc_type = 'EOP'
+        BEGIN
+            -----------------------------------------------
+            -- Create check_run_eop_claim_procedure record
+            -----------------------------------------------
+
+            INSERT INTO [check_run_eop_claim_procedure]
+            (
+                [check_run_eop_claim_id],
+                [claim_procedure_id],
+                [from_service_date],
+                [to_service_date],
+                [procedurecode_ud],
+                [procedurecode_nm],
+                [charges],
+                [write_off],
+                [procedure_ineligible_amount],
+                [benefit_ineligible_amount],
+                [cob_savings_amount],
+                [cob_deducted],
+                [withhold_amount],
+                [copay_amount],
+                [deductible],
+                [coinsurance_amount],
+                [net_amount],
+                [msa_paid],               -- elva 12/30/2013	
+                [patient_responsibility], -- elva 12/30/2013	
+                [created_user_id],
+                [modified_user_id]
+            )
+            SELECT @check_run_eop_claim_id,
+                   @claim_procedure_id,
+                   CONVERT(SMALLDATETIME, @service_from_date),
+                   CONVERT(SMALLDATETIME, @service_to_date),
+                   @procedure_code_ud,
+                   @procedure_code_nm,
+                   ISNULL(@charges, 0),
+                   ISNULL(@write_off, 0),
+                   ISNULL(@procedure_ineligible_amount, 0),
+                   ISNULL(@benefit_ineligible_amount, 0),
+                   ISNULL(@cob_savings_amount, 0),
+                   ISNULL(@cob_deducted, 0),
+                   ISNULL(@withhold_amount, 0),
+                   ISNULL(@copay_amount, 0),
+                   ISNULL(@deductible, 0),
+                   ISNULL(@coinsurance_amount, 0),
+                   ISNULL(@net_amount, 0),
+                   ISNULL(@msa_total_used, 0),         -- elva 12/30/2013	
+                   ISNULL(@patient_responsibility, 0), -- elva 12/30/2013	
+                   @modified_user_id,
+                   @modified_user_id;
+
+            SET @check_run_eop_claim_procedure_id = SCOPE_IDENTITY();
+        END;
+        -----------------------------------------------
+        -- Create EOB/EOP Remarks For Procedures
+        -----------------------------------------------
+
+        --truncate table #remark_table  -- don't truncate gather all and then print at the end 
+
+        TRUNCATE TABLE [#remark_table_accum];
+
+
+        INSERT INTO [#remark_table]
+        (
+            [line_number],
+            [remark],
+            [remark_type],
+            [eob_id]
+        )
+        SELECT SUBSTRING(@servicelinesequence_char, 3, 4),
+               LEFT(LTRIM(RTRIM([eob].[eob_ud])) + ' ' + LTRIM(RTRIM(ISNULL([eob].[description], ''))) + ' '
+                    + LTRIM(RTRIM(ISNULL([additional_information], ''))), 450) AS [remark],
+               'GENERAL' AS [remark_type],
+               [claim_procedure_eob].[eob_id]
+        FROM [claim_procedure_eob]
+            JOIN [eob]
+                ON [claim_procedure_eob].[eob_id] = [eob].[eob_id]
+        WHERE [claim_procedure_eob].[claim_procedure_id] = @claim_procedure_id
+              AND [eob].[print_on_eob] = 1
+        ORDER BY [eob].[ranking],
+                 --, claim_procedure_eob.claim_procedure_eob_id DESC -- NYL has multiline eobs that this DESC sort makes hard to read so changed to ASC on 11/18/2009 jjt
+                 [claim_procedure_eob].[claim_procedure_eob_id];
+
+
+        --kdw 20250325
+        IF @mi_bill_type = 'U'
+        BEGIN
+
+            INSERT INTO [#remark_table]
+            (
+                [line_number],
+                [remark],
+                [remark_type],
+                [eob_id]
+            )
+            SELECT DISTINCT
+                   SUBSTRING(@servicelinesequence_char, 3, 4),
+                   LEFT(LTRIM(RTRIM([e].[eob_ud])) + ' ' + LTRIM(RTRIM(ISNULL([e].[description], ''))) + ' '
+                        + LTRIM(RTRIM(ISNULL([cuse].[additional_information], ''))), 450) AS [remark],
+                   'GENERAL' AS [remark_type],
+                   [cuse].[eob_id]
+            FROM [dbo].[claim_ub92_service_eob] AS [cuse]
+                INNER JOIN [dbo].[claim_ub92_service] AS [cus]
+                    ON [cus].[claim_ub92_service_id] = [cuse].[claim_ub92_service_id]
+                INNER JOIN [dbo].[eob] AS [e]
+                    ON [e].[eob_id] = [cuse].[eob_id]
+                LEFT JOIN [#remark_table] AS [rt] --want to make sure we are not pulling the remark more than once per line
+                    ON [rt].[eob_id] = [cuse].[eob_id]
+            WHERE [cus].[claim_procedure_id] = @claim_procedure_id
+                  AND [e].[print_on_eob] = 1
+                  AND [cus].[claim_procedure_id] IS NOT NULL --adding for efficiency
+                  AND [rt].[remark_id] IS NULL;
+        --      ORDER BY [e].[ranking],
+        --               --, claim_procedure_eob.claim_procedure_eob_id DESC -- NYL has multiline eobs that this DESC sort makes hard to read so changed to ASC on 11/18/2009 jjt
+        --               [cuse].[claim_ub92_service_eob_id],
+        --LEFT(LTRIM(RTRIM([e].[eob_ud])) + ' ' + LTRIM(RTRIM(ISNULL([e].[description], ''))) + ' '
+        --                  + LTRIM(RTRIM(ISNULL([cuse].[additional_information], ''))), 450),
+        -- [cuse].[eob_id];
+
+        END;
+
+        -----------------------------------------------
+        -- Create EOB Remarks For Clinical Edits
+        -----------------------------------------------
+        INSERT INTO [#remark_table]
+        (
+            [line_number],
+            [remark],
+            [remark_type],
+            [clinical_edit_id]
+        )
+        SELECT SUBSTRING(@servicelinesequence_char, 3, 4),
+               LEFT(LTRIM(RTRIM([ce].[aa_rule_number])) + 'A ' + LTRIM(RTRIM(ISNULL([ce].[aa_rule_name], ''))) + ' '
+                    + LTRIM(RTRIM(ISNULL([cpce].[additional_information], ''))), 450) AS [remark],
+               'CLINICAL' AS [remark_type],
+               [cpce].[clinical_edit_id]
+        FROM [claim_procedure_clinical_edit] [cpce]
+            INNER JOIN [clinical_edit] [ce]
+                ON [cpce].[clinical_edit_id] = [ce].[clinical_edit_id]
+        WHERE [cpce].[claim_procedure_id] = @claim_procedure_id
+              AND [cpce].[active] = 1 -- this edit was generated for this claim line and not in support of another claim line
+              AND [cpce].[action_code] <> '2' -- this line was not a supporting documenation line
+                                              --AND cpce.override = 0  -- not overriden
+              AND [cpce].[print_on_eob] = 1
+              AND [cpce].[deleted] = 0
+        ORDER BY [ce].[aa_rule_number];
+
+
+        --kdw 20250325
+        IF @mi_bill_type = 'U'
+        BEGIN
+
+            INSERT INTO [#remark_table]
+            (
+                [line_number],
+                [remark],
+                [remark_type],
+                [clinical_edit_id]
+            )
+            SELECT DISTINCT
+                   SUBSTRING(@servicelinesequence_char, 3, 4), --include distinct, because we only want one per line, and there can be multiple ub lines on one claim_procedure
+                   LEFT(LTRIM(RTRIM([ce].[aa_rule_number])) + 'A ' + LTRIM(RTRIM(ISNULL([ce].[aa_rule_name], ''))) + ' '
+                        + LTRIM(RTRIM(ISNULL([cusce].[additional_information], ''))), 450) AS [remark],
+                   'CLINICAL' AS [remark_type],
+                   [cusce].[clinical_edit_id]
+            FROM [dbo].[claim_ub92_service_clinical_edit] AS [cusce]
+                INNER JOIN [dbo].[claim_ub92_service] AS [cus]
+                    ON [cus].[claim_ub92_service_id] = [cusce].[claim_ub92_service_id]
+                INNER JOIN [dbo].[clinical_edit] [ce]
+                    ON [cusce].[clinical_edit_id] = [ce].[clinical_edit_id]
+                LEFT JOIN [#remark_table] AS [rt]
+                    ON [rt].[clinical_edit_id] = [cusce].[clinical_edit_id]
+            WHERE [cus].[claim_procedure_id] = @claim_procedure_id
+                  AND [cus].[claim_procedure_id] IS NOT NULL
+                  AND [cusce].[active] = 1 -- this edit was generated for this claim line and not in support of another claim line
+                  AND [cusce].[action_code] <> '2' -- this line was not a supporting documenation line
+                                                   --AND cpce.override = 0  -- not overriden
+                  AND [cusce].[print_on_eob] = 1
+                  AND [cusce].[deleted] = 0
+                  AND [rt].[remark_id] IS NULL;
+        --         ORDER BY [ce].[aa_rule_number],
+        --LEFT(LTRIM(RTRIM([ce].[aa_rule_number])) + 'A ' + LTRIM(RTRIM(ISNULL([ce].[aa_rule_name], ''))) + ' '
+        --                     + LTRIM(RTRIM(ISNULL([cusce].[additional_information], ''))), 450),
+        --			[cusce].[clinical_edit_id];
+
+        END;
+        -----------------------------------------------
+        --	Create EOB Remarks For External Edits
+        --	jjt	09/28/2018  This was added a year later than the Change Healthcare print vendor code
+        -----------------------------------------------
+        INSERT INTO [#remark_table]
+        (
+            [line_number],
+            [remark],
+            [remark_type]
+        )
+        SELECT DISTINCT --	There can be duplicates if the external edit vendor sent the same edit for multiple lines.
+               SUBSTRING(@servicelinesequence_char, 3, 4),
+               LEFT(LTRIM(RTRIM([cpee].[edit_code])) + '-'
+                    + LTRIM(RTRIM(ISNULL([cpee].[edit_additional_information], 'Denied by Payment Integrity'))), 450) AS [remark],
+               'EXTERNAL' AS [remark_type]
+        FROM [claim_procedure_external_edit] [cpee]
+        WHERE [cpee].[claim_procedure_id] = @claim_procedure_id
+              AND [cpee].[print_on_eop] = 1
+              AND ISNULL([cpee].[deleted], 0) = 0;
+
+
+        IF @mi_bill_type = 'U'
+        BEGIN
+
+            INSERT INTO [#remark_table]
+            (
+                [line_number],
+                [remark],
+                [remark_type]
+            )
+            SELECT DISTINCT --	There can be duplicates if the external edit vendor sent the same edit for multiple lines.
+                   SUBSTRING(@servicelinesequence_char, 3, 4),
+                   LEFT(LTRIM(RTRIM([cusee].[edit_code])) + '-'
+                        + LTRIM(RTRIM(ISNULL([cusee].[edit_additional_information], 'Denied by Payment Integrity'))), 450) AS [remark],
+                   'EXTERNAL' AS [remark_type]
+            FROM [dbo].[claim_ub92_service_external_edit] AS [cusee]
+                INNER JOIN [dbo].[claim_ub92_service] AS [cus]
+                    ON [cus].[claim_ub92_service_id] = [cusee].[claim_ub92_service_id]
+            WHERE [cus].[claim_procedure_id] = @claim_procedure_id
+                  AND [cusee].[print_on_eop] = 1
+                  AND [cus].[claim_procedure_id] IS NOT NULL
+                  AND ISNULL([cusee].[deleted], 0) = 0;
+
+        END;
+
+        --	jjt 12/19/2017 Added print_on_eop to give more fine tune control here.  Add print_on_eob if we ever decide to echo these comments to the member EOB.
+        --	and cpee.override = 0
+        --	and cpee.recommended_action in ('DENY')
+        --SELECT * FROM [#remark_table] AS [rt]
+        -----------------------------------------------
+        -- Create EOB Remarks for Accumulators only on first claim procedure 
+        -----------------------------------------------
+        IF @print_accumulators_on_eob = 1
+           AND (@doc_type = 'EOB')
+           AND @first_claim_procedure = 1
+        BEGIN
+            --------------------------------------------------
+            -- Fill the temp table with information from the
+            -- accumulator and benefit_accum_def table for the member
+            --------------------------------------------------
+            SET @VISIT_TYPE = 4;
+            --DELETE FROM @member_accum_info		-- don't delete accumulate all of them
+
+            DELETE FROM @member_accum;
+            INSERT INTO @member_accum
+            (
+                [benefit_accum_def_id],
+                [amount],
+                [carryover_amount],
+                [flow_amount],
+                [seed_amount],
+                [period_begin_date],
+                [period_end_date],
+                [benefitplan_id],
+                [employergroup_id]
+            )
+            SELECT --DISTINCT
+                [a].[benefit_accum_def_id],
+                [a].[amount],
+                [a].[carryover_amount],
+                [a].[flow_amount],
+                [a].[seed_amount],
+                [a].[period_begin_date],
+                [a].[period_end_date],
+                [a].[benefitplan_id],
+                [a].[employergroup_id]
+            FROM [accumulator] [a]
+            WHERE [a].[member_id] = @claim_member_id
+                  AND
+                  (
+                      [a].[period_begin_date] IS NULL
+                      OR @service_from_date
+                  BETWEEN [a].[period_begin_date] AND [a].[period_end_date]
+                      OR [a].[period_begin_date]
+                  BETWEEN @service_from_date AND @service_to_date
+                  );
+
+            DELETE FROM @member_accum_info;
+            INSERT INTO @member_accum_info
+            (
+                [line_number],
+                [benefit_accum_def_id],
+                --,	benefit_accum_def_ud
+                [print_on_eob],
+                [eob_display_name],
+                [benefit_accum_type_id],
+                [carryover_amount],
+                [accumulated_amount],
+                [flow_amount],
+                [seed_amount],
+                [total_amount],
+                [maximum],
+                [period_begin_date],
+                [period_end_date],
+                [member_id],
+                [benefitplan_id],
+                [employergroup_id],
+                [apply_copay],
+                [apply_coinsurance],
+                [apply_deductible],
+                [apply_netpay],
+                [apply_visits],
+                [is_individual]
+            )
+            SELECT --distinct
+                SUBSTRING(@servicelinesequence_char, 3, 4),
+                [benefit_accum_def].[benefit_accum_def_id],
+                                --benefit_accum_def.benefit_accum_def_ud, 
+                [benefit_accum_def].[print_on_eob],
+                [benefit_accum_def].[eob_display_name],
+                [benefit_accum_def].[benefit_accum_type_id],
+                [a].[carryover_amount],
+                [a].[amount] AS [accumulated_amount],
+                [a].[flow_amount],
+                [a].[seed_amount],
+                0 AS [total_amount],
+                [benefit_accum_def].[maximum],
+                [a].[period_begin_date],
+                [a].[period_end_date],
+                @claim_member_id,
+                [benefit_accum_def].[benefitplan_id],
+                [a].[employergroup_id],
+                [apply_copay],
+                [apply_coinsurance],
+                [apply_deductible],
+                [apply_netpay],
+                [apply_visits],
+                [is_individual] -- elva 02/10/2020
+
+            FROM [benefit_accum_def]
+                INNER JOIN @member_accum [a]
+                    ON [benefit_accum_def].[benefit_accum_def_id] = [a].[benefit_accum_def_id]
+            WHERE [benefit_accum_def].[benefitplan_id] = @benefitplan_id
+                  AND [a].[employergroup_id] = @employergroup_id;
+
+
+            UPDATE @member_accum_info
+            SET [carryover_amount] = 0
+            WHERE [carryover_amount] IS NULL;
+            UPDATE @member_accum_info
+            SET [accumulated_amount] = 0
+            WHERE [accumulated_amount] IS NULL;
+            UPDATE @member_accum_info
+            SET [seed_amount] = 0
+            WHERE [seed_amount] IS NULL;
+            UPDATE @member_accum_info
+            SET [flow_amount] = 0
+            WHERE [flow_amount] IS NULL;
+
+            -- remove rows with no MONEY so the join below fOR visit totals doesn't make extra display rows fOR days that should'nt have a value.  just a display issue but confusing to look it.
+            DELETE FROM @member_accum_info
+            WHERE [carryover_amount] = 0
+                  AND [accumulated_amount] = 0
+                  AND [seed_amount] = 0
+                  AND [flow_amount] = 0;
+
+            UPDATE [mai]
+            SET [accumulated_amount] = [total_visit].[claim_amount],
+                [total_amount] = [total_visit].[total_amount] + [flow_amount]
+            FROM
+            (
+                SELECT SUM([accumulated_amount]) AS [claim_amount],
+                       SUM([accumulated_amount]) AS [total_amount],
+                       [mai_total].[benefit_accum_def_id]
+                FROM @member_accum_info [mai_total]
+                WHERE [mai_total].[benefit_accum_type_id] = @VISIT_TYPE
+                GROUP BY [mai_total].[benefit_accum_def_id]
+            ) AS [total_visit]
+                INNER JOIN @member_accum_info [mai]
+                    ON [total_visit].[benefit_accum_def_id] = [mai].[benefit_accum_def_id]
+            WHERE [mai].[benefit_accum_type_id] = @VISIT_TYPE; -- these are visit type
+
+            UPDATE [mai]
+            SET [total_amount] = ROUND([carryover_amount] + [accumulated_amount] + [seed_amount] + [flow_amount], 2)
+            FROM @member_accum_info [mai]
+            WHERE [mai].[benefit_accum_type_id] <> @VISIT_TYPE;
+
+            INSERT INTO [#remark_table_accum]
+            (
+                [line_number],
+                [remark],
+                [remark_type]
+            )
+            SELECT SUBSTRING(@servicelinesequence_char, 3, 4),
+                   LEFT([eob_display_name]
+                        --benefit_accum_def_ud 
+                        + CASE [benefit_accum_type_id]
+                              WHEN @VISIT_TYPE THEN
+                                  ' '
+                              ELSE
+                                  ' $'
+                          END + CASE [benefit_accum_type_id]
+                                    WHEN @VISIT_TYPE THEN
+                                        CONVERT(VARCHAR(20), CONVERT(INT, [total_amount]))
+                                    ELSE
+                                        CONVERT(VARCHAR(20), [total_amount])
+                                END + CASE [benefit_accum_type_id]
+                                          WHEN @VISIT_TYPE THEN
+                                              '/'
+                                          ELSE
+                                              '/$'
+                                      END + CASE [benefit_accum_type_id]
+                                                WHEN @VISIT_TYPE THEN
+                                                    CONVERT(VARCHAR(20), CONVERT(INT, [maximum]))
+                                                ELSE
+                                                    CONVERT(VARCHAR(20), [maximum])
+                                            END, 450) AS [remark],
+                   'ACCUM' AS [remark_type]
+            FROM
+            (
+                SELECT DISTINCT
+                       [mai].[benefit_accum_def_id],
+                       --,	mai.benefit_accum_def_ud
+                       [mai].[benefit_accum_type_id],
+                       [mai].[print_on_eob],
+                       [mai].[eob_display_name],
+                       [mai].[total_amount],
+                       [mai].[maximum],
+                       [mai].[member_id],
+                       [mai].[benefitplan_id],
+                       [mai].[employergroup_id]
+                FROM @member_accum_info [mai]
+            --	WHERE print_on_eob = 1
+            ) AS [final_table]
+            ORDER BY [eob_display_name],
+                     [maximum],
+                     [benefit_accum_def_id];
+            --ORDER BY benefit_accum_def_ud, maximum, benefit_accum_def_id
+            -- if check_run_communit_id = 50 (nextera) we need to create two  accumulator records  elva 12/10/2019
+            -- Nextera has a special Members Health Statement which print after the EOB with the oop and the deductable 
+            -- they have a new community also 51 
+            -- 08/19/2021 I think all of blue cross blue shield groups Check_run_community_id = 55 will use the 
+            -- new format.  Flagler is the latest group 
+            --KDW 20250123 add new community groups
+            IF @check_run_community_id IN ( 50, 51, 55, 60, 61, 62, 63 ) -- elva 05/27/2021 elva 08/19/2021
+            BEGIN
+                SET @used = 0;
+                SET @max = 0;
+                SET @remain = 0;
+                SET @eob_display_name = '';
+                SET @accum_type = 0;
+                SET @accum_type_char = '';
+
+                INSERT INTO [#healthplan_accum]
+                (
+                    [eob_display_name],
+                    [is_individual],
+                    [used],
+                    [max_allowed]
+                )
+                SELECT ISNULL([eob_display_name], ''),
+                       [is_individual],
+                       ISNULL(SUM([mai].[total_amount]), 0),
+                       ISNULL(SUM([mai].[maximum]), 0)
+                FROM @member_accum_info [mai]
+                WHERE [benefit_accum_type_id] = 1
+                      AND [print_on_eob] = 1 -- deductible first type was eob_display_name  like '%out-of-pocket%'  	02/09/2020
+                GROUP BY [eob_display_name],
+                         [is_individual] -- will give the totals by each display name.
+                ORDER BY [is_individual] DESC;
+                SELECT @max_count = @@ROWCOUNT;
+
+                SET @counter = 1;
+
+                WHILE @counter <= @max_count
+                BEGIN
+                    SELECT @accum_type = [healthplan_accum_id],
+                           @eob_display_name = [eob_display_name],
+                           @used = [used],
+                           @max = [max_allowed]
+                    FROM [#healthplan_accum]
+                    WHERE [healthplan_accum_id] = @counter;
+
+                    SELECT @remain = @max - @used;
+                    SELECT @used_char = CONVERT(VARCHAR(15), @used);
+                    SELECT @remain_char = CONVERT(VARCHAR(15), @remain);
+                    SELECT @max_char = CONVERT(VARCHAR(15), @max);
+                    SELECT @accum_type_char = 'D' + CONVERT(CHAR(10), @accum_type); -- elva 02/12/2020
+
+					DELETE FROM @accumTable
+
+                    --41960 insert into table type
+                    INSERT INTO @accumTable
+                    (
+                        [cRecordType],
+                        [cRecordVersion],
+                        [cDocId],
+                        [cClaimSequence],
+                        [cAccumulatorDescription],
+                        [cAmountMet],
+                        [cAmountRemaining],
+                        [cAmountToMeet],
+                        [cAccumulatorType],
+                        [cClaimYear],
+                        [cOpenField1],
+                        [cOpenField2],
+                        [cOpenField3],
+                        [cOpenField4],
+                        [cOpenField5],
+                        [cOpenField6],
+                        [cAccumulatorDescription2],
+                        [cIndividual],
+                        [cRelationshipToInsured],
+                        [cOpenField7],
+                        [cClaimYearStart1],
+                        [cClaimYearEnd1],
+                        [cClaimYearStart2],
+                        [cClaimYearEnd2],
+                        [cAmountMet2],
+                        [cClaimYearStart3],
+                        [cClaimYearEnd3],
+                        [cAmountMet3],
+                        [cClaimYearStart4],
+                        [cClaimYearEnd4],
+                        [cAmountMet4],
+                        [cPrimarySortOrder],
+                        [cTier],
+                        [cTierDescription],
+                        [cOpenField8],
+                        [cOpenField9],
+                        [cOpenField10],
+                        [cOpenField11],
+                        [cOpenField12],
+                        [cOpenField13],
+                        [cOpenField14],
+                        [cOpenField15],
+                        [cOpenField16],
+                        [cOpenAmount1],
+                        [cOpenAmount2],
+                        [cOpenAmount3],
+                        [cOpenAmount4],
+                        [cAccumulatorClaimType],
+                        [cDependentNumber],
+                        [cClaimRelationString]
+                    )
+                    VALUES
+                    (   '07',                             -- cRecordType - char(2)
+                        14,                               -- cRecordVersion - char(2)
+                        ISNULL(@doc_id, ''),              -- cDocId - char(25)
+                        ISNULL(@claim_sequence_char, ''), -- cClaimSequence - char(6)
+                        ISNULL(@eob_display_name, ''),    -- cAccumulatorDescription - char(80)
+                        ISNULL(@used_char, ''),           -- cAmountMet - char(15)
+                        ISNULL(@remain_char, ''),         -- cAmountRemaining - char(15)
+                        ISNULL(@max_char, ''),            -- cAmountToMeet - char(15)
+                        ISNULL(@accum_type_char, ''),     -- cAccumulatorType - char(10)
+                        ISNULL(@claimyear, ''),           -- cClaimYear - char(4)
+                        '',                               -- cOpenField1 - char(30)
+                        '',                               -- cOpenField2 - char(30)
+                        '',                               -- cOpenField3 - char(30)
+                        '',                               -- cOpenField4 - char(60)
+                        '',                               -- cOpenField5 - char(60)
+                        '',                               -- cOpenField6 - char(100)
+                        '',                               -- cAccumulatorDescription2 - char(80)
+                        'FAMILY',                         -- cIndividual - char(30)
+                        'FAMILY',                         -- cRelationshipToInsured - char(20)
+                        '',                               -- cOpenField7 - char(200)
+                        '',                               -- cClaimYearStart1 - char(8)
+                        '',                               -- cClaimYearEnd1 - char(8)
+                        '',                               -- cClaimYearStart2 - char(8)
+                        '',                               -- cClaimYearEnd2 - char(8)
+                        '',                               -- cAmountMet2 - char(15)
+                        '',                               -- cClaimYearStart3 - char(8)
+                        '',                               -- cClaimYearEnd3 - char(8)
+                        '',                               -- cAmountMet3 - char(15)
+                        '',                               -- cClaimYearStart4 - char(8)
+                        '',                               -- cClaimYearEnd4 - char(8)
+                        '',                               -- cAmountMet4 - char(15)
+                        '',                               -- cPrimarySortOrder - char(100)
+                        '',                               -- cTier - char(80)
+                        '',                               -- cTierDescription - char(80)
+                        '',                               -- cOpenField8 - char(60)
+                        '',                               -- cOpenField9 - char(60)
+                        '',                               -- cOpenField10 - char(60)
+                        '',                               -- cOpenField11 - char(60)
+                        '',                               -- cOpenField12 - char(60)
+                        '',                               -- cOpenField13 - char(60)
+                        '',                               -- cOpenField14 - char(60)
+                        '',                               -- cOpenField15 - char(60)
+                        '',                               -- cOpenField16 - char(60)
+                        '',                               -- cOpenAmount1 - char(15)
+                        '',                               -- cOpenAmount2 - char(15)
+                        '',                               -- cOpenAmount3 - char(15)
+                        '',                               -- cOpenAmount4 - char(15)
+                        '',                               -- cAccumulatorClaimType - char(3)
+                        '',                               -- cDependentNumber - char(20)
+                        ''                                -- cClaimRelationString - char(50)
+                        );
+
+                    --41960  set string 
+                    SET @recordaccum =
+                    (
+                        SELECT TOP 1
+                               [at].[cRecordType] + @tab + [at].[cRecordVersion] + @tab + [at].[cDocId] + @tab
+                               + [at].[cClaimSequence] + @tab + [at].[cAccumulatorDescription] + @tab + [at].[cAmountMet]
+                               + @tab + [at].[cAmountRemaining] + @tab + [at].[cAmountToMeet] + @tab
+                               + [at].[cAccumulatorType] + @tab + [at].[cClaimYear] + @tab + [at].[cOpenField1] + @tab
+                               + [at].[cOpenField2] + @tab + [at].[cOpenField3] + @tab + [at].[cOpenField4] + @tab
+                               + [at].[cOpenField5] + @tab + [at].[cOpenField6] + @tab + [at].[cAccumulatorDescription2]
+                               + @tab + [at].[cIndividual] + @tab + [at].[cRelationshipToInsured] + @tab
+                               + [at].[cOpenField7] + @tab + [at].[cClaimYearStart1] + @tab + [at].[cClaimYearEnd1] + @tab
+                               + [at].[cClaimYearStart2] + @tab + [at].[cClaimYearEnd2] + @tab + [at].[cAmountMet2] + @tab
+                               + [at].[cClaimYearStart3] + @tab + [at].[cClaimYearEnd3] + @tab + [at].[cAmountMet3] + @tab
+                               + [at].[cClaimYearStart4] + @tab + [at].[cClaimYearEnd4] + @tab + [at].[cAmountMet4] + @tab
+                               + [at].[cPrimarySortOrder] + @tab + [at].[cTier] + @tab + [at].[cTierDescription] + @tab
+                               + [at].[cOpenField8] + @tab + [at].[cOpenField9] + @tab + [at].[cOpenField10] + @tab
+                               + [at].[cOpenField11] + @tab + [at].[cOpenField12] + @tab + [at].[cOpenField13] + @tab
+                               + [at].[cOpenField14] + @tab + [at].[cOpenField15] + @tab + [at].[cOpenField16] + @tab
+                               + [at].[cOpenAmount1] + @tab + [at].[cOpenAmount2] + @tab + [at].[cOpenAmount3] + @tab
+                               + [at].[cOpenAmount4] + @tab + [at].[cAccumulatorClaimType] + @tab
+                               + [at].[cDependentNumber] + @tab + [at].[cClaimRelationString]
+                        FROM @accumTable AS [at]
+                    );
+
+                    --41960 log to table
+                    EXEC [dbo].[check_run_07_accumulator_log_redcard] @check_run_id = @check_run_id,           -- int
+                                                                      @voucher_id = @voucher_id,               -- int
+                                                                      @claim_id = @claim_id,                   -- int
+                                                                      @claim_ud = @claim_ud,                   -- varchar(25)
+                                                                      @doc_type = @doc_type,                   -- char(3)
+                                                                      @doc_id = @doc_id,                       -- char(25)
+                                                                      @sec_user_id = @user_id,                 -- int
+                                                                      @accumulator_record = @accumTable;       -- check_run_07_accumulator_type
+
+
+
+                    EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                            @line_number OUTPUT,
+                                                                            @recordaccum,
+                                                                            1,
+                                                                            @modified_user_id;
+                    IF @return_status <> 0
+                    BEGIN
+                        -- ========== RAISE ERROR: LOG MESSAGE AND SEND EMAIL NOTIFICATION =================================
+                        SET @error_message
+                            = CONCAT(
+                                        'Fatal Error 4 - An error in check_run_record_insert_redcard has occured with recordaccumulator: ',
+                                        ISNULL(@recordaccum, 'null') + ' : claim_id : ' + ISNULL(@claim_id, 0)
+                                    );
+                        RAISERROR(@error_message, 16, 1);
+                    END;
+                    SET @counter = @counter + 1;
+                END;
+
+                TRUNCATE TABLE [#healthplan_accum];
+
+                INSERT INTO [#healthplan_accum]
+                (
+                    [eob_display_name],
+                    [is_individual],
+                    [used],
+                    [max_allowed]
+                )
+                SELECT ISNULL([eob_display_name], ''),
+                       [is_individual],
+                       ISNULL(SUM([mai].[total_amount]), 0),
+                       ISNULL(SUM([mai].[maximum]), 0)
+                FROM @member_accum_info [mai]
+                WHERE [benefit_accum_type_id] = 3
+                      AND [print_on_eob] = 1 -- out of pocket type was eob_display_name  like '%out-of-pocket%'  	02/09/2020
+                GROUP BY [eob_display_name],
+                         [is_individual] -- will give the totals by each display name.
+                ORDER BY [is_individual] DESC;
+                SELECT @max_count = @@ROWCOUNT;
+                --  sum DED used 
+
+                SET @counter = 1;
+
+                WHILE @counter <= @max_count
+                BEGIN
+                    SELECT @accum_type = [healthplan_accum_id],
+                           @eob_display_name = [eob_display_name],
+                           @used = [used],
+                           @max = [max_allowed]
+                    FROM [#healthplan_accum]
+                    WHERE [healthplan_accum_id] = @counter;
+
+                    SELECT @remain = @max - @used;
+                    SELECT @used_char = CONVERT(VARCHAR(15), @used);
+                    SELECT @remain_char = CONVERT(VARCHAR(15), @remain);
+                    SELECT @max_char = CONVERT(VARCHAR(15), @max);
+                    SELECT @accum_type_char = 'O' + CONVERT(CHAR(10), @accum_type); -- elva 02/12/2020
+
+					DELETE FROM @accumTable
+
+                    --41960 insert into table type
+                    INSERT INTO @accumTable
+                    (
+                        [cRecordType],
+                        [cRecordVersion],
+                        [cDocId],
+                        [cClaimSequence],
+                        [cAccumulatorDescription],
+                        [cAmountMet],
+                        [cAmountRemaining],
+                        [cAmountToMeet],
+                        [cAccumulatorType],
+                        [cClaimYear],
+                        [cOpenField1],
+                        [cOpenField2],
+                        [cOpenField3],
+                        [cOpenField4],
+                        [cOpenField5],
+                        [cOpenField6],
+                        [cAccumulatorDescription2],
+                        [cIndividual],
+                        [cRelationshipToInsured],
+                        [cOpenField7],
+                        [cClaimYearStart1],
+                        [cClaimYearEnd1],
+                        [cClaimYearStart2],
+                        [cClaimYearEnd2],
+                        [cAmountMet2],
+                        [cClaimYearStart3],
+                        [cClaimYearEnd3],
+                        [cAmountMet3],
+                        [cClaimYearStart4],
+                        [cClaimYearEnd4],
+                        [cAmountMet4],
+                        [cPrimarySortOrder],
+                        [cTier],
+                        [cTierDescription],
+                        [cOpenField8],
+                        [cOpenField9],
+                        [cOpenField10],
+                        [cOpenField11],
+                        [cOpenField12],
+                        [cOpenField13],
+                        [cOpenField14],
+                        [cOpenField15],
+                        [cOpenField16],
+                        [cOpenAmount1],
+                        [cOpenAmount2],
+                        [cOpenAmount3],
+                        [cOpenAmount4],
+                        [cAccumulatorClaimType],
+                        [cDependentNumber],
+                        [cClaimRelationString]
+                    )
+                    VALUES
+                    (   '07',                             -- cRecordType - char(2)
+                        14,                               -- cRecordVersion - char(2)
+                        ISNULL(@doc_id, ''),              -- cDocId - char(25)
+                        ISNULL(@claim_sequence_char, ''), -- cClaimSequence - char(6)
+                        ISNULL(@eob_display_name, ''),    -- cAccumulatorDescription - char(80)
+                        ISNULL(@used_char, ''),           -- cAmountMet - char(15)
+                        ISNULL(@remain_char, ''),         -- cAmountRemaining - char(15)
+                        ISNULL(@max_char, ''),            -- cAmountToMeet - char(15)
+                        ISNULL(@accum_type_char, ''),     -- cAccumulatorType - char(10)
+                        ISNULL(@claimyear, ''),           -- cClaimYear - char(4)
+                        '',                               -- cOpenField1 - char(30)
+                        '',                               -- cOpenField2 - char(30)
+                        '',                               -- cOpenField3 - char(30)
+                        '',                               -- cOpenField4 - char(60)
+                        '',                               -- cOpenField5 - char(60)
+                        '',                               -- cOpenField6 - char(100)
+                        '',                               -- cAccumulatorDescription2 - char(80)
+                        'FAMILY',                         -- cIndividual - char(30)
+                        'FAMILY',                         -- cRelationshipToInsured - char(20)
+                        '',                               -- cOpenField7 - char(200)
+                        '',                               -- cClaimYearStart1 - char(8)
+                        '',                               -- cClaimYearEnd1 - char(8)
+                        '',                               -- cClaimYearStart2 - char(8)
+                        '',                               -- cClaimYearEnd2 - char(8)
+                        '',                               -- cAmountMet2 - char(15)
+                        '',                               -- cClaimYearStart3 - char(8)
+                        '',                               -- cClaimYearEnd3 - char(8)
+                        '',                               -- cAmountMet3 - char(15)
+                        '',                               -- cClaimYearStart4 - char(8)
+                        '',                               -- cClaimYearEnd4 - char(8)
+                        '',                               -- cAmountMet4 - char(15)
+                        '',                               -- cPrimarySortOrder - char(100)
+                        '',                               -- cTier - char(80)
+                        '',                               -- cTierDescription - char(80)
+                        '',                               -- cOpenField8 - char(60)
+                        '',                               -- cOpenField9 - char(60)
+                        '',                               -- cOpenField10 - char(60)
+                        '',                               -- cOpenField11 - char(60)
+                        '',                               -- cOpenField12 - char(60)
+                        '',                               -- cOpenField13 - char(60)
+                        '',                               -- cOpenField14 - char(60)
+                        '',                               -- cOpenField15 - char(60)
+                        '',                               -- cOpenField16 - char(60)
+                        '',                               -- cOpenAmount1 - char(15)
+                        '',                               -- cOpenAmount2 - char(15)
+                        '',                               -- cOpenAmount3 - char(15)
+                        '',                               -- cOpenAmount4 - char(15)
+                        '',                               -- cAccumulatorClaimType - char(3)
+                        '',                               -- cDependentNumber - char(20)
+                        ''                                -- cClaimRelationString - char(50)
+                        );
+
+                    --41960  set string 
+                    SET @recordaccum =
+                    (
+                        SELECT TOP 1
+                               [at].[cRecordType] + @tab + [at].[cRecordVersion] + @tab + [at].[cDocId] + @tab
+                               + [at].[cClaimSequence] + @tab + [at].[cAccumulatorDescription] + @tab + [at].[cAmountMet]
+                               + @tab + [at].[cAmountRemaining] + @tab + [at].[cAmountToMeet] + @tab
+                               + [at].[cAccumulatorType] + @tab + [at].[cClaimYear] + @tab + [at].[cOpenField1] + @tab
+                               + [at].[cOpenField2] + @tab + [at].[cOpenField3] + @tab + [at].[cOpenField4] + @tab
+                               + [at].[cOpenField5] + @tab + [at].[cOpenField6] + @tab + [at].[cAccumulatorDescription2]
+                               + @tab + [at].[cIndividual] + @tab + [at].[cRelationshipToInsured] + @tab
+                               + [at].[cOpenField7] + @tab + [at].[cClaimYearStart1] + @tab + [at].[cClaimYearEnd1] + @tab
+                               + [at].[cClaimYearStart2] + @tab + [at].[cClaimYearEnd2] + @tab + [at].[cAmountMet2] + @tab
+                               + [at].[cClaimYearStart3] + @tab + [at].[cClaimYearEnd3] + @tab + [at].[cAmountMet3] + @tab
+                               + [at].[cClaimYearStart4] + @tab + [at].[cClaimYearEnd4] + @tab + [at].[cAmountMet4] + @tab
+                               + [at].[cPrimarySortOrder] + @tab + [at].[cTier] + @tab + [at].[cTierDescription] + @tab
+                               + [at].[cOpenField8] + @tab + [at].[cOpenField9] + @tab + [at].[cOpenField10] + @tab
+                               + [at].[cOpenField11] + @tab + [at].[cOpenField12] + @tab + [at].[cOpenField13] + @tab
+                               + [at].[cOpenField14] + @tab + [at].[cOpenField15] + @tab + [at].[cOpenField16] + @tab
+                               + [at].[cOpenAmount1] + @tab + [at].[cOpenAmount2] + @tab + [at].[cOpenAmount3] + @tab
+                               + [at].[cOpenAmount4] + @tab + [at].[cAccumulatorClaimType] + @tab
+                               + [at].[cDependentNumber] + @tab + [at].[cClaimRelationString]
+                        FROM @accumTable AS [at]
+                    );
+
+                    --41960 log to table
+                    EXEC [dbo].[check_run_07_accumulator_log_redcard] @check_run_id = @check_run_id,           -- int
+                                                                      @voucher_id = @voucher_id,               -- int
+                                                                      @claim_id = @claim_id,                   -- int
+                                                                      @claim_ud = @claim_ud,                   -- varchar(25)
+                                                                      @doc_type = @doc_type,                   -- char(3)
+                                                                      @doc_id = @doc_id,                       -- char(25)
+                                                                      @sec_user_id = @user_id,                 -- int
+                                                                      @accumulator_record = @accumTable;       -- check_run_07_accumulator_type
+
+
+
+                    EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                            @line_number OUTPUT,
+                                                                            @recordaccum,
+                                                                            1,
+                                                                            @modified_user_id;
+                    IF @return_status <> 0
+                    BEGIN
+                        -- ========== RAISE ERROR: LOG MESSAGE AND SEND EMAIL NOTIFICATION =================================
+                        SET @error_message
+                            = CONCAT(
+                                        'Fatal Error 5 - An error in check_run_record_insert_redcard has occured with recordaccumulator: ',
+                                        ISNULL(@recordaccum, 'null') + ' : claim_id : ' + ISNULL(@claim_id, 0)
+                                    );
+                        RAISERROR(@error_message, 16, 1);
+                    END;
+                    SET @counter = @counter + 1;
+                END;
+
+            END; -- nextera check run community id = 50 added 12/04/2019
+        END; -- if @print_accumulators_on_eob 
+        IF @doc_type = 'EOB'
+        BEGIN
+            INSERT INTO [#remark_table]
+            (
+                [line_number],
+                [remark],
+                [remark_type],
+                [eob_id],
+                [clinical_edit_id]
+            )
+            SELECT DISTINCT
+                   [line_number],
+                   [remark],
+                   [remark_type],
+                   [eob_id],
+                   [clinical_edit_id]
+            FROM [#remark_table_accum];
+        END;
+
+
+        IF @doc_type = 'EOB'
+        BEGIN
+
+            -- Create check_run_eob_claim_procedure_remark record
+            -----------------------------------------------
+            INSERT INTO [check_run_eob_claim_procedure_remark]
+            (
+                [check_run_eob_claim_procedure_id],
+                [remark],
+                [remark_type],
+                [created_user_id],
+                [modified_user_id]
+            )
+            SELECT DISTINCT
+                   @check_run_eob_claim_procedure_id,
+                   [remark],
+                   [remark_type],
+                   @modified_user_id,
+                   @modified_user_id
+            FROM [#remark_table]
+            WHERE [remark] IS NOT NULL
+                  AND
+                  (
+                      @first_claim_procedure = 1
+                      OR [remark_type] <> 'ACCUM'
+                  ); -- only put accumulators on first procedure to save records
+
+            SET @first_claim_procedure = 0;
+        END;
+
+        IF @doc_type = 'EOP'
+        BEGIN
+
+            -- Create check_run_eop_claim_procedure_remark record
+            -----------------------------------------------
+            INSERT INTO [check_run_eop_claim_procedure_remark]
+            (
+                [check_run_eop_claim_procedure_id],
+                [remark],
+                [remark_type],
+                [created_user_id],
+                [modified_user_id]
+            )
+            SELECT DISTINCT
+                   @check_run_eop_claim_procedure_id,
+                   [remark],
+                   [remark_type],
+                   @modified_user_id,
+                   @modified_user_id
+            FROM [#remark_table]
+            WHERE [remark] IS NOT NULL
+                  AND
+                  (
+                      @first_claim_procedure = 1
+                      OR [remark_type] <> 'ACCUM'
+                  ); -- only put accumulators on first procedure to save records
+
+            SET @first_claim_procedure = 0;
+        END;
+
+        SET @record_id = @record_id + 1;
+    END;
+    -- all the claim procedure/service lines are written, we will not write the total.  Redcard will calculate it
+    -- now create new table.  We only want to write to the check_run_batch_redcard One line for each unique remark code and one line
+    -- for each unique remark code of all the associated line numbers within a voucher.  the check_run_redcard_remark table will accumulate 
+    -- all the information until we have processed all claims for the voucher then we will add it to the redcard table 
+    IF (
+           @doc_type = 'EOB'
+           AND @suppress_eob = 0
+       )
+       OR
+       (
+           @doc_type = 'EOP'
+           AND @suppress_eop = 0
+           AND @suppress_this_claim = 0
+       ) -- elva 05/24/2023 added @suppress_this_claim 
+    BEGIN
+        -- added doc_id 
+        INSERT INTO [check_run_redcard_remark]
+        (
+            [check_run_id],
+            [voucher_id],
+            [claim_id],
+            [claim_ud],
+            [doc_type],
+            [doc_id],
+            [line_number],
+            [remark],
+            [remark_type],
+            [eob_id],
+            [clinical_edit_id],
+            [created_user_id],
+            [modified_user_id]
+        )
+        SELECT @check_run_id,
+               @voucher_id,
+               @claim_id,
+               @claim_ud,
+               @doc_type,
+               @doc_id,
+               [line_number],
+               [remark],
+               [remark_type],
+               [eob_id],
+               [clinical_edit_id],
+               @modified_user_id,
+               @modified_user_id
+        FROM [#remark_table]
+        WHERE RTRIM(LTRIM([remark])) <> '';
+
+
+    END;
+
+END TRY
+BEGIN CATCH
+    -- LOG ERROR AND SEND EMAIL =============================================================
+    SET @return_status = -1;
+    SET @error_message = 'check_run_serviceline_redcard fatal error 8' + CHAR(10);
+    SET @error_message = CONCAT(@error_message, 'ERROR_MESSAGE: ', ERROR_MESSAGE(), ' ERROR_LINE: ', ERROR_LINE());
+
+    EXEC [dbo].[finance_email_notification] @user_id,
+                                            @error_message,
+                                            @ProgramName,
+                                            @sp_name;
+    RETURN @return_status;
+
+----------------------------------------------------------------------------------------- 
+END CATCH;
