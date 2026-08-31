@@ -1,0 +1,743 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[hart_vol_claim_get_subscriber_communication_list]    Script Date: 8/30/2026 8:54:11 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER  	PROCEDURE [dbo].[hart_vol_claim_get_subscriber_communication_list]
+    @arg_increment_type CHAR(1) = 'Q', --adding flexibility to run by a different frequency type
+                                       /*	This parameter below works in conjunction with the above parameter @arg_current_increment. Please read the 
+		comment above for more details.																						*/
+    @arg_force_run_cur_qtr_again BIT = 0,
+	@report_date Datetime = NULL --US#45202 Added parameter to be able to run report for any quarter
+AS
+/********************************************************************************  
+Name:           hart_vol_claim_get_subscriber_communication_list  
+Description:    Gathers Hartford Voluntary Programmer's suscribers to communicate program's benefits.
+Used by:        
+Test harness:     
+                USE [mcr_dc_prod]  
+                GO  
+				
+				-- 3 min 27 sec
+				-- 3 min 11 sec
+				truncate table [EDee_test].[dbo].[hart_vol_claim_connect_communication]
+
+                DECLARE @RC int  
+  
+                EXECUTE @RC = [dbo].[hart_vol_claim_get_subscriber_communication_list]   
+  
+                select @RC  
+				SELECT COUNT(*) FROM [EDee_test].[dbo].[hart_vol_claim_connect_communication]
+
+				-- Use these queries below to check the data:
+				SELECT  * FROM [EDee_test].[dbo].[hart_vol_claim_connect_communication] where communication_type = 'Email' and product_id = 1264
+				union
+				SELECT  * FROM [EDee_test].[dbo].[hart_vol_claim_connect_communication] where communication_type = 'Text'
+				union
+				SELECT * FROM [EDee_test].[dbo].[hart_vol_claim_connect_communication] where communication_type = 'No Communication'
+
+				select count(*), communication_type from [EDee_test].[dbo].[hart_vol_claim_connect_communication] group by communication_type 
+
+				select member_id from [EDee_test].[dbo].[hart_vol_claim_connect_communication] group by member_id having count(*) > 1
+
+
+Execution time: 2 min 10 sec
+Created:		2022-01-05 by TonyH
+Modified:		kdw 02/14/2023 modified to remove sqlreporting
+				CM	12/03/2024	Story 38021 - Added Parent Referenct to "HIG-" Employer Groups
+				SP	10/16/2025  Story 42604 - Use hart_employergroup_exclusion to filter out records
+				PM  03/23/2026  Story 45202 - Claims | Hartford Claim Connect Quarterly Communication
+********************************************************************************/
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+
+        DECLARE @server VARCHAR(50) = @@SERVERNAME;
+        DECLARE @return INT;
+        DECLARE @error_message VARCHAR(8000);
+      --  DECLARE @report_date DATETIME;
+        DECLARE @start_date DATETIME;
+        DECLARE @end_date DATETIME;
+        DECLARE @no_communication_id INT;
+        DECLARE @arg_increment INT; -- The increment can be passed in as var so that if the user wants to run it for a specific quarter/month of the current year, he/she can specify it in the parameter of this SP.
+        DECLARE @arg_increment_year INT; -- The increment year can be passed in as var so that if the user wants to run it for a specific year, he/she can specify it in the parameter of this SP.
+
+        DECLARE @sproc VARCHAR(50) = OBJECT_NAME(@@procid);
+        DECLARE @success BIT = 0;
+        DECLARE @suser VARCHAR(100) = SYSTEM_USER;
+        DECLARE @cnt INT;
+
+		IF @report_date IS NULL 
+		BEGIN
+        SELECT @report_date = GETDATE();
+		END
+        IF @arg_increment_type = 'Q'
+        BEGIN
+			--IF @arg_increment IS NULL
+			--BEGIN
+				SELECT @arg_increment = DATEPART(QUARTER, @report_date);
+			--END
+            SELECT @arg_increment_year = DATEPART(YEAR, @report_date);
+            SELECT @start_date = DATEADD(QUARTER, DATEDIFF(QUARTER, 0, @report_date), 0);
+            SELECT @end_date = DATEADD(DAY, -1, DATEADD(qq, DATEDIFF(qq, 0, @report_date) + 1, 0));
+        END;
+		-- need to comment this code since Monthly is out of scope.
+   --     IF @arg_increment_type = 'M'
+   --     BEGIN
+			--IF @arg_increment IS NULL
+			--BEGIN
+			--	SELECT @arg_increment = DATEPART(MONTH, @report_date);
+			--END
+   --         SELECT @arg_increment_year = DATEPART(YEAR, @report_date);
+   --         SELECT @start_date = DATEADD(MONTH, DATEDIFF(MONTH, 0, @report_date), 0);
+   --         SELECT @end_date = DATEADD(DAY, -1, DATEADD(MONTH, DATEDIFF(MONTH, 0, @report_date) + 1, 0));
+   --     END;
+
+        -----------------------------------		!!!!!!!!	CAUTION		!!!!!!!!!	----------------------------------------------------------
+        -- DO NOT USE TABLE VARIABLE AND DO NOT USE IN KEY WORD IN THE WHERE CLAUSE to do this SP. The first select into below ran for 3 mins when
+        -- I used table variable and/or IN key word. Best performance is with a temp table and an INNER JOIN.
+        -- Also the temp table below is intentionally built with product_id duplicated so that any developer can see the different template_type_ud 
+        -- if they want to.
+        -- However, when this temp table is actually used later in this SP, a select distinct on the product_id, product_hierarchy, communication_frequency
+        -- will be used to get a distinct list of product_id.
+        --------------------------------------------------------------------------------------------------------------------------------------
+        DROP TABLE IF EXISTS [#tab_product_id_unique];
+        DROP TABLE IF EXISTS [#tab_product_id_duped];
+
+        CREATE TABLE [#tab_product_id_duped]
+        (
+            [hart_vol_claim_connect_template_type_id] INT,
+            [template_type_ud] VARCHAR(100),
+            [product_id] INT,
+            [product_hierarchy] TINYINT,
+            [communication_frequency] VARCHAR(5)
+        );
+
+        CREATE TABLE [#tab_product_id_unique]
+        (
+            [product_id] INT,
+            [product_hierarchy] TINYINT,
+            [communication_frequency] VARCHAR(5),
+            [email_id] INT
+        );
+        /*	------------------------------------------------------------------------------------------------------------------------------------------
+			-------	This code has been replaced by the section of code beneath it so that we don't need to hardcode product_id within this SP	----------
+		SET @arg_product_id_string = replace(@arg_product_id_string, ' ', '')
+
+		/*	----------	Note that more product_id(s) can be added by Hartford in the future. So the best way is to use a table to do our select	------	*/
+		/*	----------	in the code below																										------	*/
+		insert #tab_product_id_duped (product_id)
+		select [value] from string_split(@arg_product_id_string, ',')
+		*/
+        ------------------------------------------------------------------------------------------------------------------------------------------
+
+        --Insert #tab_product_id_duped ([hart_vol_claim_connect_template_type_id], template_type_ud, product_id, product_hierarchy, communication_frequency)
+        --select [hart_vol_claim_connect_template_type_id], template_type_ud, product_id, product_hierarchy, communication_frequency from [EDee].[dbo].[hart_vol_claim_connect_template_type] order by product_hierarchy
+
+        /* Testing - 
+			select * from #tab_product_id_duped
+			select distinct product_id, product_hierarchy, communication_frequency from #tab_product_id_duped
+		*/
+
+
+            INSERT INTO [#tab_product_id_duped]
+            (
+                [hart_vol_claim_connect_template_type_id],
+                [template_type_ud],
+                [product_id],
+                [product_hierarchy],
+                [communication_frequency]
+            )
+            SELECT [hvcctt].[hart_vol_claim_connect_template_type_id],
+                   [hvcctt].[template_type_ud],
+                   [hvcctt].[product_id],
+                   [hvcctt].[product_hierarchy],
+                   [hvcctt].[communication_frequency]
+            FROM [EDee].[dbo].[hart_vol_claim_connect_template_type] AS [hvcctt];
+
+
+        -- Set up unique product_id table from the dupes list above.
+        INSERT INTO [#tab_product_id_unique]
+        (
+            [product_id],
+            [product_hierarchy],
+            [communication_frequency]
+        )
+        SELECT DISTINCT
+               [product_id],
+               [product_hierarchy],
+               [communication_frequency]
+        FROM [#tab_product_id_duped]
+        WHERE [communication_frequency] = @arg_increment_type
+              AND [product_id] IS NOT NULL;
+
+        CREATE CLUSTERED INDEX [idx_tab_product_id_unique_hierarchy]
+        ON [#tab_product_id_unique] ([product_hierarchy] ASC);
+        CREATE NONCLUSTERED INDEX [idx_tab_product_id_unique_product]
+        ON [#tab_product_id_unique] (
+                                        [product_id],
+                                        [communication_frequency]
+                                    );
+
+        UPDATE [#tab_product_id_unique]
+        SET [email_id] = [hart_vol_claim_connect_template_type_id]
+        FROM [#tab_product_id_duped] AS [hvcctt]
+            INNER JOIN [#tab_product_id_unique] AS [tpiu]
+                ON [tpiu].[product_id] = [hvcctt].[product_id]
+        WHERE [hvcctt].[template_type_ud] LIKE '%email%';
+
+        -- UPDATE [#tab_product_id_unique]
+        -- SET [text_id] = [hart_vol_claim_connect_template_type_id]
+        -- FROM [#tab_product_id_duped] AS [hvcctt]
+        --     INNER JOIN [#tab_product_id_unique] AS [tpiu]
+        --         ON [tpiu].[product_id] = [hvcctt].[product_id]
+        -- WHERE [hvcctt].[template_type_ud] LIKE '%text%';
+
+
+
+        SELECT TOP 1
+               @no_communication_id = [hart_vol_claim_connect_template_type_id]
+        FROM [#tab_product_id_duped] AS [hvcctt]
+        WHERE [template_type_ud] = 'no_communication';
+
+        -- If the communication_frquency is quarterly and today is not the first business day of this quarter, then stop the code
+        -- and notify the user. If the user still wants to run it even if it is not the 1st business day of the quarter, then he needs to set
+        -- @arg_override_1st_business_day_run_rule = 1 and re-run.
+        --If	exists(select top 1 'Q' from #tab_product_id_unique where communication_frequency = 'Q')
+        --	and (	
+        --			@arg_current_increment is NULL
+        --			and [dbo].[fn_GetFirstBusDayOfQuarter](Getdate()) != Cast(Getdate() as date)
+        --		)
+        --	Begin
+        --		set @error_message = 'This file generation job only runs on the first business day of this quarter.' + CHAR(13) 
+        --							+ 'Today is not the first business day. If you still want to run this job, please'  + CHAR(13)
+        --							+ 'set @arg_current_increment equal to the current quarter and re-run the job.'
+        --		Print @error_message
+        --		raiserror (@error_message, 16, 1)  
+        --		Set @return = 1
+        --	End
+
+        -- Now try to run this SP with @arg_current_increment = the current quarter. If the table [EDee].[dbo].[hart_vol_claim_connect_communication] 
+        -- already has current quarter's data, notify the user that if he still wants to run it, the existing current quarter's data will be SOFT DELETED
+        -- and the user. To continue to force re-run, the user needs to set @arg_force_run_cur_qtr_again = 1 and set @arg_current_increment = the current quarter.
+
+        DECLARE @frequency_word VARCHAR(20);
+
+
+            IF EXISTS
+            (
+                SELECT 1
+                FROM [EDee].[dbo].[hart_vol_claim_connect_communication]
+                WHERE [communication_frequency] = @arg_increment_type
+                      AND [increment] = @arg_increment
+                      AND [increment_year] = @arg_increment_year
+                      AND [deleted] = 0
+            )
+               AND @arg_force_run_cur_qtr_again = 0
+            BEGIN
+
+               -- IF @arg_increment_type = 'M'
+                --    SET @frequency_word = 'Month';
+               -- ELSE
+                    SET @frequency_word = 'Quarter';
+
+                SET @error_message
+                    = 'This file generation job runs only if it has not been executed for the current '
+                      + @frequency_word + '.' + CHAR(13)
+                      + 'However, there is data already been generated for the current quarter. If you still want'
+                      + CHAR(13)
+                      + 'to run this job, please set @arg_force_run_cur_qtr_again = 1 and re-run the job. Please'
+                      + CHAR(13)
+                      + 'beware that if you choose to re-run, all the data that has been generated for the current'
+                      + CHAR(13)
+                      + 'quarter will first be soft deleted and then replenished with the current quarter''s data. So'
+                      + CHAR(13) + 'make sure that this is really what you want to do.';
+                PRINT @error_message;
+                RAISERROR(@error_message, 16, 1);
+                SET @return = 2;
+            END;
+
+            IF EXISTS
+            (
+                SELECT 1
+                FROM [EDee].[dbo].[hart_vol_claim_connect_communication]
+                WHERE [communication_frequency] = @arg_increment_type
+                      AND [increment] = @arg_increment
+                      AND [increment_year] = @arg_increment_year
+            )
+               AND @arg_force_run_cur_qtr_again = 1
+            BEGIN
+                SELECT @cnt = COUNT(*)
+                FROM [EDee].[dbo].[hart_vol_claim_connect_communication]
+                WHERE [communication_frequency] = @arg_increment_type
+                      AND [increment] = @arg_increment
+                      AND [increment_year] = @arg_increment_year
+                      AND [deleted] = 0;
+
+                PRINT CONVERT(VARCHAR(20), @cnt) + ' records will be soft deleted for this quarter.';
+                UPDATE [EDee].[dbo].[hart_vol_claim_connect_communication]
+                SET [deleted] = 1
+                WHERE [communication_frequency] = @arg_increment_type
+                      AND [increment] = @arg_increment
+                      AND [increment_year] = @arg_increment_year
+                      AND [deleted] = 0;
+
+
+            END;
+  
+        -- The select into #all_hart_vol_subscrbr_with_dupes below gives us all Hartford Vol Program's members based on the 3 product id's. So we are only making
+        -- one pass through all the large tables. The data in #all_hart_vol_subscrbr_with_dupes will then be used below to figure out the email-communication data
+        -- set, the text-communication data set, and then finally whatever is left over in #all_hart_vol_subscrbr_with_dupes will be the No-Communication type.
+        -- In the beginning, the data in #all_hart_vol_subscrbr_with_dupes is arbitrarily set as No-communication type. But the last select...UNION ALL statement
+        -- will correctly set the communication type to be what they should be for Email-communication type and for Text-communication type.
+        -- 7080876 (DEV 3 min with test data)
+        -- 7063174 (DEV 2 mins 39 sec without test data)
+        -- 8002346 (TEST 1 min 37 sec with test data)
+        -- 7982168 (TEST 1 min 36 sec without test data)
+        -- declare @arg_current_increment_year int=NULL, @arg_current_increment int=null, @member_id int; drop table if exists #tab_product_id_duped create table #tab_product_id_duped ([hart_vol_claim_connect_template_type_id] int, template_type_ud varchar(100), product_id INT, product_hierarchy tinyint, communication_frequency varchar(5));  drop table if exists #all_hart_vol_subscrbr_with_dupes Insert #tab_product_id_duped ([hart_vol_claim_connect_template_type_id], template_type_ud, product_id, product_hierarchy, communication_frequency) select [hart_vol_claim_connect_template_type_id], template_type_ud, product_id, product_hierarchy, communication_frequency from [EDee].[dbo].[hart_vol_claim_connect_template_type] order by product_hierarchy
+        DROP TABLE IF EXISTS [#all_hart_vol_subscrbr_unique];
+        SELECT [m].[member_id],
+               [elig].[eligibility_ud],
+               [note_id] = CONVERT(INT, NULL),
+               [email_address] = [m].[email],
+               [cell_phone] = CONVERT([BIGINT], NULL),
+               [communication_type] = 'No Communication', -- Since this set of data will help us to find the No Communication rec later, it is arbitrarily set as 'No Communication'.
+               [eg].[employergroup_id],
+               [eg].[employergroup_ud],
+               [opt_out_information] = CONVERT([VARCHAR](35), NULL),
+               [created_by] = @suser,
+               [created_date] = @report_date,
+               [updated_by] = @suser,
+               [updated_date] = @report_date,
+               [deleted] = 0,
+                                                          -- Like the [communication_type] field, since this set of data will help us to find the No Communication rec later, this
+                                                          -- template_type_id is also arbitrarily set as the id for 'No Communication' communication type.
+               [hart_vol_claim_connect_template_type_id] = @no_communication_id,
+               [gcpm].[product_id],
+               [is_error] = 0,
+               [hart_vol_claim_connect_error_log_id] = CONVERT(INT, NULL),
+               [communication_frequency] = @arg_increment_type,
+                /*	Note that this is the number of the quarter, month, week of the year when this SP is executed. So if the communication_frequency 
+				is Q for quarterly and you find the number 1 in this field, then it means this SP has been executed in the 1st quarter of the current
+				year. If the comm freqncy is M, and 7 is in this field, then this SP has been executed for July of the current year.
+				The increment can be passed in as viariable so that if the user wants to run it for a specific quarter/month of the current year, 
+				he/she can specify it in the parameter of this SP.																	*/
+              [increment] = @arg_increment,
+              [increment_year] = @arg_increment_year,
+              [person_key] = COALESCE([m].[ssn], [m].[email], [m].[phone]),
+              [product_rank] = ROW_NUMBER() OVER (
+                                    PARTITION BY COALESCE([m].[ssn], [m].[email], [m].[phone])
+                                    ORDER BY [hvcctt].[product_hierarchy]
+                                ),
+              [max_rank] = COUNT(*) OVER (
+                                PARTITION BY COALESCE([m].[ssn], [m].[email], [m].[phone])
+                            )
+
+        -- count(m.member_id)
+        INTO [#all_hart_vol_subscrbr_with_dupes]
+        FROM [#tab_product_id_unique] AS [hvcctt]
+            INNER JOIN [dbo].[group_contract_product_map] [gcpm]
+                ON [hvcctt].[product_id] = [gcpm].[product_id]
+            INNER JOIN [dbo].[group_contract_product] [gcp]
+                ON [gcpm].[group_contract_product_id] = [gcp].[group_contract_product_id]
+            INNER JOIN [dbo].[group_contract] AS [gc]
+                ON [gc].[group_contract_id] = [gcp].[group_contract_id]
+            INNER JOIN [dbo].[eligibility] [elig]
+                ON [elig].[group_contract_id] = [gc].[group_contract_id]
+            INNER JOIN [dbo].[member] [m]
+                ON [m].[member_id] = [elig].[member_id] --changed the group to pull by eligibility instead of member for indexing
+            INNER JOIN [dbo].[employergroup] [eg]
+                ON [elig].[employergroup_id] = [eg].[employergroup_id]
+						INNER JOIN [dbo].[employergroup] AS [parent]
+				ON parent.[employergroup_id] = eg.[parent_employergroup_id]
+			LEFT JOIN [dbo].[hart_employergroup_exclusion] ee on eg.employergroup_id=ee.employergroup_id and ee.communication_frequency = @arg_increment_type --sp 42604; added communication_frequency
+        WHERE [m].[member_id] = [m].[subscriber_id] -- Only go after the subscribers' records.
+              --		 and m.member_id=1756405
+              AND [elig].[deleted] = 0
+              AND [elig].[active] = 1
+              AND [m].[deleted] = 0
+              AND [m].[active] = 1
+              AND @start_date >= [elig].[eff_date]
+              AND
+              (
+                  @end_date <= [elig].[term_date]
+                  OR [elig].[term_date] IS NULL
+              )
+              AND
+              (
+                  [eg].[is_test_group] = 0
+                  AND [eg].[repricing_member_id] IS NULL
+              ) -- Per ADO 7259 , we can use these criteria to choose only the real recs that are not for test/research.
+              AND [hvcctt].[communication_frequency] = @arg_increment_type
+              AND [gcpm].[deleted] = 0
+              AND [gcp].[deleted] = 0
+              AND [gc].[contract_eff_date] <= @end_date
+              AND
+              (
+                  [gc].[contract_term_date] >= @start_date
+                  OR [gc].[contract_term_date] IS NULL
+              )
+              AND [gcp].[group_contract_product_id] = [elig].[group_contract_product_id]
+			  AND [parent].[employergroup_ud] IN ('Hart-HI PROD', 'HART-ACC PROD', 'HART-CI PROD'
+													, 'HIG-ACC PROD', 'HIG-HI PROD', 'HIG-CI PROD'--38021
+												)
+			  AND ee.Id is null
+        -- select * from #all_hart_vol_subscrbr_with_dupes order member_id
+
+        -- 15 sec
+        --create clustered index idx_m_id on #all_hart_vol_subscrbr_with_dupes (member_id)
+
+        -- Now use the above table to grab only the row within each group grouped by member_id that has the smallest rownum which will be 
+        -- the row that has the most wanted product_id.
+        -- 697059 (3 sec with test data)
+        -- 695819 (3 sec without test data)
+        -- 800417 (4 sec with test data)
+        -- 798828 (3 sec without test data)
+
+        --US#45202 Capture history for emails sent previously so that the next product email can be determined
+
+		DROP TABLE IF EXISTS [#last_sent];
+
+		WITH hist AS
+		(
+			SELECT
+				[person_key] = COALESCE([m].[ssn], [m].[email], [m].[phone]),
+				[product_id] = [c].[product_id],
+				[rownum] = ROW_NUMBER() OVER
+					  (
+						  PARTITION BY COALESCE([m].[ssn], [m].[email], [m].[phone])
+						  ORDER BY [c].[created_date] DESC,
+						  [c].[hart_vol_claim_connect_communication_id] desc
+					  )
+			FROM [EDee].[dbo].[hart_vol_claim_connect_communication] [c]
+			INNER JOIN [dbo].[member] [m]
+				ON [m].[member_id] = [c].[member_id]
+			WHERE [c].[deleted] = 0
+			  AND [c].[communication_type] = 'Email'
+			  AND [c].[communication_frequency] = 'Q'
+		)
+		SELECT
+			[person_key],
+			[last_product_id] = [product_id]
+		INTO [#last_sent]
+		FROM hist
+		WHERE [rownum] = 1;
+
+        DROP TABLE IF EXISTS [#all_hart_vol_subscrbr_unique];
+
+		WITH ranked AS
+		(
+			SELECT
+				[a].*,
+				[b].[product_rank] AS [last_sent_rank]
+			FROM [#all_hart_vol_subscrbr_with_dupes] [a]
+			LEFT JOIN [#last_sent] [ls]
+				ON [ls].[person_key] = [a].[person_key]
+			LEFT JOIN [#all_hart_vol_subscrbr_with_dupes] [b]
+				ON [b].[person_key] = [a].[person_key]
+			  AND [b].[product_id] = [ls].[last_product_id]
+		),
+		final_pick AS
+		(
+			SELECT *,
+				  [target_rank] = CASE
+									  WHEN [last_sent_rank] IS NULL THEN 1
+									  WHEN [last_sent_rank] >= [max_rank] THEN 1
+									  ELSE [last_sent_rank] + 1
+								  END
+			FROM ranked
+		),
+
+		final_dedup AS
+		(
+			SELECT *,
+					ROW_NUMBER() OVER
+					(
+						PARTITION BY [member_id]
+						ORDER BY [product_rank], [product_id]
+					) AS rownum
+			FROM final_pick
+			WHERE [product_rank] = [target_rank]
+		)
+		SELECT *
+		INTO [#all_hart_vol_subscrbr_unique]
+		FROM final_dedup
+		WHERE rownum = 1;
+ 
+
+        -- Make sure that the above unique table is really unique in the member_id column:
+        -- declare @member_id int, @error_message varchar(8000)
+        --select top 1 @member_id = member_id from #all_hart_vol_subscrbr_unique group by member_id having count(*) > 1 order by member_id
+        --If @member_id > 0
+        --	Begin
+        --		Select @error_message = convert(varchar(20), @member_id)
+        --		Raiserror ('This member_id [%s] is not unique in the #all_hart_vol_subscrbr_unique table. It should be that each member has only 1 unique record picked out according to the product_id for sending communication.', 16, 1, @error_message) -- this causes to jump into the catch block.
+        --	End
+
+        /*	1. Testing:	Discovered that the real data from Bekah's team does not have members that have multiple product_ids. Only the test data has members 
+						that have multple product_ids and the multiple product_id combination is 1264 + 1257 (see the 2nd test query below):
+						
+						select a.member_id from #all_hart_vol_subscrbr_with_dupes a group by a.member_id having min(a.product_id) != max(a.product_id)
+						
+						select b.* 
+						from #all_hart_vol_subscrbr_with_dupes  b 
+						where	exists (select a.member_id from #all_hart_vol_subscrbr_with_dupes a where a.member_id = b.member_id 
+											group by a.member_id having min(a.product_id) != max(a.product_id)) 
+								and exists (select a.member_id from #all_hart_vol_subscrbr_with_dupes a where a.member_id = b.member_id and a.product_id=1264)
+								and exists (select a.member_id from #all_hart_vol_subscrbr_with_dupes a where a.member_id = b.member_id and a.product_id=1257)
+							-- Skipped this bc test data only has the combination of 1264 + 1257: and exists (select a.member_id from #all_hart_vol_subscrbr_with_dupes a where a.member_id = b.member_id and a.product_id=1263)
+						order by b.member_id desc, b.product_id
+
+						-- Test cell number records:
+						select * from #all_hart_vol_subscrbr_with_dupes where member_id = 6592980/*ph num test*/ 6592981--6592980--6592979--6592977--6592976--6592974--6592973--6592970--6592966     /*random test*/-- 2411717(test group)   2708193(test group)  3310420  1758414(test group) 2411710(test group)  1756405(test group) -- 
+						
+						select * from #all_hart_vol_subscrbr_unique where member_id = 6592980/*ph num test*/ 6592981--6592980--6592979--6592977--6592976--6592974--6592973--6592970--6592966     /*random test*/-- 2411717(test group)   2708193(test group)  3310420  1758414(test group) 2411710(test group)  1756405(test group) -- 
+
+			2. Testing phone numbers: Kass provided these phone numbers to test and make sure that the cell number is stripped correctly and if it is alphabets, do not include it in the cell communication type.
+				6592966	4178675309
+				6592970 pen65000
+				6592973 1234567890
+				6592974 04175552300
+				6592976 8166250789
+				6592977 9132220000
+				6592979 4055552233
+				6592980 5065551234
+				6592981 12345678
+				
+				These 2 queries below will show you whether a employer group is a test group:
+
+				select employergroup_id, * from member where member_id = 6592980
+
+				select employergroup_id, * from member where member_id = 2411717
+				select is_test_group, repricing_member_id, * from employergroup where employergroup_id = 8454
+		*/
+
+        -- Free tempdb space up since there is a lot of data stored in there by the above select into.
+        --drop table if exists #all_hart_vol_subscrbr_with_dupes
+
+        CREATE UNIQUE CLUSTERED INDEX [idx_m_id]
+        ON [#all_hart_vol_subscrbr_unique] ([member_id]);
+
+        ---------------------------------------------------		Details of how we can come up with a combined set of data	---------------------------------------------
+        --| The 2nd and 3rd set below will be union together to form the #have_email_have_cell_dupes table. Then the #have_email_have_cell_dupes table will be deduped	|
+        --| and then combined together with the records that only exist in the #all_hart_vol_subscrbr_unique table. Whatever recs that only exist in the				| 
+        --| #all_hart_vol_subscrbr_unique table will be the No Communication set of members.																			|
+        --|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+        -- Second, gather the ones that have email address. These are the subscribers we will email.
+        -- 403420 (DEV 12 sec with test data)
+        -- 402706 (DEV 1 sec without test data)
+        -- 659394 (TEST 20 sec without test data)
+        DROP TABLE IF EXISTS [#have_email_unique];
+        SELECT [u].[member_id],
+               [u].[eligibility_ud],
+               [note_id] = CONVERT(INT, NULL),
+               [email_address] = [u].[email_address],
+               [cell_phone] = CONVERT([BIGINT], NULL),
+               [communication_type] = 'Email', -- Since this set of data will help us to find the No Communication rec later, it is arbitrarily set as 'No Communication'.
+               [u].[employergroup_id],
+               [u].[employergroup_ud],
+               [opt_out_information] = CONVERT([VARCHAR](35), NULL),
+               [created_by] = @suser,
+               [created_date] = @report_date,
+               [updated_by] = @suser,
+               [updated_date] = @report_date,
+               [deleted] = 0,
+               [hart_vol_claim_connect_template_type_id] = [tpiu].[email_id],
+               [u].[product_id],
+               [is_error] = CONVERT(BIT, 0),
+               [hart_vol_claim_connect_error_log_id] = CONVERT(INT, NULL),
+               [communication_frequency] = [u].[communication_frequency],
+               [increment] = [u].[increment],
+               [increment_year] = [u].[increment_year]
+        -- count(m.member_id)
+        INTO [#have_email_unique]
+        FROM [#all_hart_vol_subscrbr_unique] [u]
+            INNER JOIN [#tab_product_id_unique] AS [tpiu]
+                ON [tpiu].[product_id] = [u].[product_id]
+        WHERE CHARINDEX('@', [u].[email_address]) > 0; -- Must be an email with an @ symbol.
+
+        -- select top 10 * from #have_email_unique where product_id = 1257
+
+        --UNION ALL
+        -- Third, gather the ones that has no email address and member_category_id = 882 in the member_category_assign table and a numeric 9 digit 
+        -- cell number is available in the comment column in the member_category_assign table. These are the subscribers that we will text them.
+        -- Currently, we don't have any 882 records in the member_category_assign table. So this query below returns 0 count.
+        -- 6 (1 sec without test data - Kass provided testing phone numbers)
+        -- #US45202 Commented out the stale code to send text
+        -- INSERT INTO [#have_email_unique] --handled as separate insert to avoid as much text evaluation below.
+        -- SELECT [u].[member_id],
+        --        [u].[eligibility_ud],
+        --        [note_id] = CONVERT(INT, NULL),
+        --        [email_address] = [u].[email_address],
+        --        [cell_phone] = CASE
+        --                           WHEN ISNUMERIC([dbo].[fn_StripPhNum]([mca].[coment])) = 1 THEN
+        --                               CONVERT([BIGINT], [dbo].[fn_StripPhNum]([mca].[coment]))
+        --                           ELSE
+        --                               0
+        --                       END,
+        --        [communication_type] = 'Text', -- Since this set of data will help us to find the No Communication rec later, it is arbitrarily set as 'No Communication'.
+        --        [u].[employergroup_id],
+        --        [u].[employergroup_ud],
+        --        [opt_out_information] = CONVERT([VARCHAR](35), NULL),
+        --        [created_by] = @suser,
+        --        [created_date] = @report_date,
+        --        [updated_by] = @suser,
+        --        [updated_date] = @report_date,
+        --        [deleted] = 0,
+        --        [hart_vol_claim_connect_template_type_id] = [tpiu].[text_id],
+        --        [u].[product_id],
+        --        [is_error] = CONVERT(BIT, 0),
+        --        [hart_vol_claim_connect_error_log_id] = CONVERT(INT, NULL),
+        --        [communication_frequency] = [u].[communication_frequency],
+        --        [increment] = [u].[increment],
+        --        [increment_year] = [u].[increment_year]
+        -- -- count(m.member_id)
+        -- FROM [#all_hart_vol_subscrbr_unique] [u]
+        --     INNER JOIN [dbo].[member_category_assign] [mca]
+        --         ON [u].[member_id] = [mca].[member_id]
+        --     INNER JOIN [dbo].[member_category] [mc]
+        --         ON [mca].[member_category_id] = [mc].[member_category_id]
+        --     INNER JOIN [#tab_product_id_unique] AS [tpiu]
+        --         ON [tpiu].[product_id] = [u].[product_id]
+        --     LEFT JOIN [#have_email_unique] AS [hehcu]
+        --         ON [hehcu].[member_id] = [mca].[member_id]
+        -- WHERE [hehcu].[member_id] IS NULL
+        --       --ISNULL(LTRIM(RTRIM([u].[email_address])), '') = '' -- Count is 35927 when where clause only executes up to here.
+        --       -- The comnet column must have numeric value in it and it must be 10-digit cell number.
+        --       AND
+        --       (
+        --           ISNUMERIC([dbo].[fn_StripPhNum]([mca].[coment])) = 1
+        --           AND LEN([dbo].[fn_StripPhNum]([mca].[coment])) = 10
+        --           -- The criteria below prevents a phone number that only has the same digit repeated.
+        --           AND LTRIM(RTRIM([dbo].[fn_StripPhNum]([mca].[coment]))) != REPLICATE(
+        --                                                                                   LEFT(LTRIM(RTRIM([dbo].[fn_StripPhNum]([mca].[coment]))), 1),
+        --                                                                                   LEN(LTRIM(RTRIM([dbo].[fn_StripPhNum]([mca].[coment]))))
+        --                                                                               )
+        --       )
+        --       AND [mca].[member_category_id] = 882; -- 882 means member_category_ud = CELL PHONE. This caused this query to return 0 count b/c there is no 882 rec in mca table.
+
+        CREATE UNIQUE CLUSTERED INDEX [idx_m_id]
+        ON [#have_email_unique] ([member_id]);
+
+      
+            -- truncate table [EDee].[dbo].[hart_vol_claim_connect_communication]
+            INSERT [EDee].[dbo].[hart_vol_claim_connect_communication]
+            (
+                [member_id],
+                [eligibility_ud],
+                [note_id],
+                [email_address],
+                [cell_phone],
+                [communication_type],
+                [employergroup_id],
+                [employergroup_ud],
+                [opt_out_information],
+                [created_by],
+                [created_date],
+                [updated_by],
+                [updated_date],
+                [deleted],
+                [hart_vol_claim_connect_template_type_id],
+                [product_id],
+                [is_error],
+                [hart_vol_claim_connect_error_log_id],
+                [communication_frequency],
+                [increment],
+                [increment_year]
+            )
+            SELECT [member_id],
+                   [eligibility_ud],
+                   [note_id],
+                   [email_address],
+                   [cell_phone],
+                   [communication_type],
+                   [employergroup_id],
+                   [employergroup_ud],
+                   [opt_out_information],
+                   [created_by],
+                   [created_date],
+                   [updated_by],
+                   [updated_date],
+                   [deleted],
+                   [hart_vol_claim_connect_template_type_id],
+                   [product_id],
+                   [is_error],
+                   [hart_vol_claim_connect_error_log_id],
+                   [communication_frequency],
+                   [increment],
+                   [increment_year]
+            FROM [#have_email_unique] -- where member_id = 1756405 -- 2411717   -- 2708193-- 3310420 --  1758414 2411710 
+            UNION ALL
+            -- This query below grabs only the ones that exist in #all_hart_vol_subscrbr_unique and not in #have_email_unique
+            -- and thus producing the No Communication list.
+            SELECT [a].[member_id],
+                   [a].[eligibility_ud],
+                   [a].[note_id],
+                   [a].[email_address],
+                   [a].[cell_phone],
+                   [a].[communication_type],
+                   [a].[employergroup_id],
+                   [a].[employergroup_ud],
+                   [a].[opt_out_information],
+                   [a].[created_by],
+                   [a].[created_date],
+                   [a].[updated_by],
+                   [a].[updated_date],
+                   [a].[deleted],
+                   [a].[hart_vol_claim_connect_template_type_id],
+                   [a].[product_id],
+                   [a].[is_error],
+                   [a].[hart_vol_claim_connect_error_log_id],
+                   [a].[communication_frequency],
+                   [a].[increment],
+                   [a].[increment_year]
+            FROM [#all_hart_vol_subscrbr_unique] [a]
+                LEFT JOIN [#have_email_unique] [b]
+                    ON [a].[member_id] = [b].[member_id]
+            WHERE [b].[member_id] IS NULL
+            ORDER BY [communication_type];
+
+
+        DROP TABLE IF EXISTS [#tab_product_id_unique];
+        DROP TABLE IF EXISTS [#tab_product_id_duped];
+        DROP TABLE IF EXISTS [#all_hart_vol_subscrbr_unique];
+        DROP TABLE IF EXISTS [#have_email_unique];
+
+
+        SET @return = 0; -- Set @return to 0 to indicate a successful run.
+    END TRY
+    BEGIN CATCH
+	PRINT ERROR_MESSAGE();
+        DROP TABLE IF EXISTS [#tab_product_id_unique];
+        DROP TABLE IF EXISTS [#tab_product_id_duped];
+        DROP TABLE IF EXISTS [#all_hart_vol_subscrbr_unique];
+        DROP TABLE IF EXISTS [#have_email_unique];
+		DROP TABLE IF EXISTS [#last_sent];
+
+        DECLARE @ErrorMessage NVARCHAR(4000);
+        DECLARE @ErrorSeverity INT;
+        DECLARE @ErrorState INT;
+        SET @return = 1; -- Set @return to 1 to indicate there is an error.
+        SET @ErrorMessage = ERROR_MESSAGE();
+        SET @ErrorSeverity = ERROR_SEVERITY();
+        SET @ErrorState = ERROR_STATE();
+
+        --RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+        EXECUTE [dbo].[hart_vol_claim_connect_wf_2_error_log] @transaction_id = 0,                    -- int  
+                                                              @hart_vol_claim_connect_archive_id = 0, -- int  
+                                                              @hart_vol_claim_status_id = 0,          -- int  
+                                                              @stored_procedure = @sproc,             -- varchar(100)  
+                                                              @error_message = @ErrorMessage,         -- varchar(1000)  
+                                                              @server_name = @server,                 -- varchar(100)  
+                                                              @init_by = '';                          -- varchar(50)  
+
+
+
+    END CATCH;
+
+    RETURN @return;
+END;
