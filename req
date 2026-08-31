@@ -1,28 +1,15 @@
-Description: 
+For PaySame AND  PayMore corrected claims we will use a PLB segment to report the previously paid amounts.  
 
- 
+When we use the PLB segment we represent the SV03 and CLP04 values as the corrected claim amount without subtracting the previously paid amount, Then in the PLB segment we report the previously paid amount.  This allows us to take the CLP04 amount and subtract the PLB segment which would result in the BPR02 value represent what the additional payment would be or 0
 
-As the user, I want the system to no longer stop claims with 406 edit when boxes "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim, so that the system can auto adjudicate these types of claims.
+For PayLess (Overpayments) - The corrected claim process reporting will use PLB segments to represent the Corrected Claim Payment.  This PLB amount will match the amount presented in the CLP04 element
 
- 
+As a reminder - BPR02 =CLP04-PLB
+CLP04= sumofSVC03 segments
+SVC03=SVC02 - CAS segments
 
-Objectives: 
+For Overpayment transaction the PLB segment will be included in the 835 reporting and will represent the CORRECTED claim payment.
 
- 
+For PayMore, PaySame we will use the PLB segment representing the previously paid amounts 
 
-We need to deliver the following:
-
-Remove claims logic that stop claims for 406 edit when the "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim (see screenshots below and in attachment).
-All other logic for the 406 edit will remain in place; we are just removing logic for this one scenario.
- 
-
-Additional Information:
-
-Claims are auto adjudicated by the system when the "Auto" or "Other Accident" are checked under the "Condition Related To" section of the claim.  Claim does NOT stop for 406 edit.
-
-Kassandra Wise
-commented 28m ago
-
-
-@Pankaj Mehra usp_adj_L10_check_for_COB is the appropriate procedure. The eob table includes a field called adj_test_number which is 14 for eob_ud 406. When this proc gets called, it is returning that adj_test_number and the pend status for usp_adj_L20_adjudicate_claim_base to apply the status from the results.
-This procedure is in multiple adjudication streams, but they all work the same way. They call this proc and then assign status from the output of it.
+When using the PLB method the SVC03 and CLP04 will not be reduced by the previously paid amounts (Prev paid amount is represented by the PLB)
