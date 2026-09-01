@@ -1,0 +1,219 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[edi_835_PLB_get]    Script Date: 9/1/2026 11:50:44 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER       PROCEDURE [dbo].[edi_835_PLB_get]
+	 @claim_id INT,
+	 @claim_status_code VARCHAR(2),			--CLP02_ClaimStatusCode 
+	 @claim_payment_amount MONEY,			--CLP04_ClaimPaymentAmount
+	 @reference_identification VARCHAR(50)  --CLP07_ReferenceIdentification
+	 
+AS
+/*************************************************************************
+Name:			[dbo].[edi_835_PLB_get]
+Description:	Returns Claim Level PLB for 835 
+Test harness:	
+DECLARE @claim_id INT,
+		@claim_status_code VARCHAR(2),
+		@claim_payment_amount MONEY,
+		@reference_identification VARCHAR(50)
+
+SET @claim_id = 112227356 ;
+SET @claim_status_code = '1';
+SET	@claim_payment_amount = 94.80  -- 4090.86;
+SET	@reference_identification = 26148192632;
+
+EXEC [dbo].[edi_835_PLB_get] 
+			         @claim_id = @claim_id,
+					 @claim_status_code  = @claim_status_code ,
+					 @claim_payment_amount = @claim_payment_amount,
+					 @reference_identification = @reference_identification
+
+--Edi app will check if return null selection.
+Created:  11/11/2025 SP 43815
+Modified: 07/16/2026 PS 47153 sending claim_procedure_eob.additional_information in PBL03-2 for OP corrected claims
+**************************************************************************/
+BEGIN
+
+	SET NOCOUNT ON
+
+	
+	IF OBJECT_ID('tempdb..#ClaimPaymentPLBInformation') IS NOT NULL 
+		DROP TABLE #ClaimPaymentPLBInformation
+
+
+	--==========PLB Segment - CLAIM PAYMENT INFORMATION ==========
+	CREATE TABLE #ClaimPaymentPLBInformation
+	(
+		 PLB01_ProviderNPI			   VARCHAR(50)    
+	    ,PLB02_CurrentDate             DATETIME 
+		,PLB0301_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0302_ReferenceId		   VARCHAR(50)   
+	    ,PLB04_MonetaryAmount		   MONEY 
+		,PLB0501_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0502_ReferenceId		   VARCHAR(50)   
+	    ,PLB06_MonetaryAmount		   MONEY 	    
+		,PLB0701_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0702_ReferenceId		   VARCHAR(50)   
+	    ,PLB08_MonetaryAmount		   MONEY 	    
+		,PLB0901_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0902_ReferenceId		   VARCHAR(50)   
+	    ,PLB10_MonetaryAmount		   MONEY 	    
+		,PLB0111_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0112_ReferenceId		   VARCHAR(50)   
+	    ,PLB12_MonetaryAmount		   MONEY 	    
+		,PLB0131_AdjustmentId		   VARCHAR(2) 
+	    ,PLB0132_ReferenceId		   VARCHAR(50)   
+	    ,PLB14_MonetaryAmount		   MONEY 	      
+	)
+
+
+	--========== General ==========
+	DECLARE @PLB01_ProviderNPI			  VARCHAR(50) 
+	DECLARE @PLB0301_AdjustmentId		  VARCHAR(2)
+	DECLARE @PLB0302_ReferenceId		  VARCHAR(50)
+	DECLARE @PLB04_MonetaryAmount		  MONEY	
+
+	DECLARE @fadj_offset_exist			  BIT 
+	DECLARE @fadj_refund_exist			  BIT
+	DECLARE @additional_information       VARCHAR(50)
+
+	BEGIN TRY
+	   
+		IF ISNULL(@claim_payment_amount,0) = 0
+		BEGIN
+			GOTO NULL_RETURN;
+		END
+		
+		IF EXISTS(
+			SELECT 1			
+			FROM claim_file_source_map m
+			WHERE m.claim_id = @claim_id
+			AND m.claim_file_source_id IN (19,20) --medica_uhc_prof(19), medica_uhc_inst(20)
+			AND deleted = 0
+		)
+		BEGIN			
+
+			--same logic as edi_835_1000B_N1_get logic
+			SELECT @PLB01_ProviderNPI = CASE WHEN c.billing_provider_npi IS NOT NULL THEN c.billing_provider_npi ELSE v.tax_id END 			
+			FROM [dbo].[claim] c 
+				INNER JOIN [dbo].[vendor] v ON v.vendor_id = c.vendor_id					
+			WHERE c.claim_id = @claim_id			
+
+			SELECT @PLB0302_ReferenceId = @reference_identification
+
+			--check @fadj_offset_exist
+			IF EXISTS(
+				Select 1 from claim_procedure cp
+				inner join claim_procedure_eob cpeob on cpeob.claim_procedure_id = cp.claim_procedure_id
+				where cpeob.eob_id = 1977		--FADJOFFSET
+				and cp.claim_id = @claim_id
+			)
+			BEGIN
+				SET @fadj_offset_exist = 1
+			END
+
+			--check @fadj_refund_exist
+			IF EXISTS 
+			(
+				SELECT 1 FROM [dbo].[claim_procedure] cp
+				INNER JOIN [dbo].[claim_procedure_status] cps  on cp.claim_procedure_status_id = cps.claim_procedure_status_id
+				WHERE cp.claim_procedure_status_id = 61 --FADJ REFUND
+				AND cp.claim_id = @claim_id
+			)
+			BEGIN
+
+				SET @fadj_refund_exist = 1
+
+				-- Check if this OP claim has additional information
+				SELECT TOP 1 @additional_information = LEFT(cpe.additional_information, 50) 
+				FROM [dbo].[claim_procedure] cp
+					INNER JOIN [dbo].[claim_procedure_eob] cpe ON cpe.claim_procedure_id = cp.claim_procedure_id
+					INNER JOIN [dbo].[eob] ON eob.eob_id = cpe.eob_id
+				WHERE 
+					cp.claim_id = @claim_id
+				 	AND eob.eob_ud = 'F01'
+					AND cpe.additional_information IS NOT NULL
+			END
+			
+
+			IF (@claim_status_code = '22') --Paymore, Payless, Paysame Negate
+			BEGIN	
+				SET @PLB0301_AdjustmentId = 'CS'
+				SET @PLB04_MonetaryAmount = @claim_payment_amount 
+			END
+			ELSE IF (@fadj_offset_exist = 1) --Paymore corrected; Pays Same corrected has same logic, Tracy verified with Tania
+			BEGIN
+				SET @PLB0301_AdjustmentId = 'CS'
+
+				--get net amount from FadjOffset line
+				SELECT @PLB04_MonetaryAmount = sum(cpb.net_amount)
+				FROM [dbo].[claim] c 
+					 INNER JOIN [dbo].[claim_procedure] cp ON cp.claim_id = c.claim_id
+					 INNER JOIN [dbo].[claim_procedure_benefit] cpb ON cpb.claim_procedure_id = cp.claim_procedure_id
+					 INNER JOIN [dbo].[claim_procedure_eob] cpeob on cpeob.claim_procedure_id = cp.claim_procedure_id					
+				WHERE
+					 c.claim_id = @claim_id
+					 AND cpb.deleted = 0
+					 AND cpeob.eob_id = 1977 --FADJOFFSET
+			END
+			ELSE IF (@fadj_refund_exist = 1) --Paylesss corrected;
+			BEGIN
+				SET @PLB0301_AdjustmentId = 'WO'
+				SET @PLB0302_ReferenceId = COALESCE(@additional_information, @PLB0302_ReferenceId) -- 47153
+				SET @PLB04_MonetaryAmount = @claim_payment_amount
+			END
+			
+			-- Return PLB Segments 
+			INSERT INTO #ClaimPaymentPLBInformation
+			(		 
+				 PLB01_ProviderNPI	
+				,PLB02_CurrentDate     
+				,PLB0301_AdjustmentId
+				,PLB0302_ReferenceId
+				,PLB04_MonetaryAmount	
+			)
+			SELECT 
+				 @PLB01_ProviderNPI		
+				,getdate()					--PLB02_CurrentDate; app will format this to DATE 
+				,@PLB0301_AdjustmentId		--PLB0301_AdjustmentId; app will add suffix colon
+				,@PLB0302_ReferenceId	    --PLB0301_AdjustmentId	
+				,@PLB04_MonetaryAmount	
+
+			IF ISNULL(@PLB0301_AdjustmentId, '') = ''
+			BEGIN
+				GOTO NULL_RETURN;
+			END
+			
+			SELECT * FROM #ClaimPaymentPLBInformation
+			
+			RETURN 0						
+		END
+
+		NULL_RETURN:
+		SELECT null --Per Henryc the App will know not to create PLB segment if returns null
+							
+	END TRY
+	BEGIN CATCH 
+
+		DECLARE @sp_name        VARCHAR(100) = (SELECT object_name(@@PROCID))
+	           ,@error_message  VARCHAR(MAX) = ERROR_MESSAGE()
+		       ,@error_state    VARCHAR(250) = ERROR_STATE()
+		       ,@error_severity VARCHAR(250) = ERROR_SEVERITY()
+	           ,@error_line     VARCHAR(250) = ERROR_LINE()
+
+
+		EXEC [dbo].[edi_835_error_log_insert]
+		     @claim_id
+			,@sp_name
+			,@error_message
+			,@error_state
+			,@error_severity
+			,@error_line
+	END CATCH 
+
+END
