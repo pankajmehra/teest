@@ -1,0 +1,1685 @@
+USE [mcr_dc_prod]
+GO
+/****** Object:  StoredProcedure [dbo].[check_run_documentadj_redcard]    Script Date: 9/4/2026 8:09:53 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+ALTER PROCEDURE [dbo].[check_run_documentadj_redcard]
+    @check_run_id INT,
+    @voucher_id INT,
+    @doc_type CHAR(3),
+    @doc_id CHAR(25),
+    @claim_id INT,
+    @claim_ud VARCHAR(25),
+    @claim_sequence INT OUTPUT,
+    @servicelinesequence INT OUTPUT,
+    @line_number INT OUTPUT
+AS
+/*************************************************************************
+Name:			[dbo].[check_run_documentadj_redcard]
+Description:	Adds service line adjustment line if there is an claim_overpayment record we can net against this claim   
+Used by:		Check Run Process 
+Test harness:	EXEC [dbo].[check_run_documentadj_redcard] 
+                     @check_run_id = 123456,
+                     @claim_id = 101300807,
+                     @claim_ud = '02032025E000015',
+                     @doc_id = '1085001FL2025020301000001',
+                     @claim_sequence = 1,
+                     @servicelinesequence = 0,
+                     @line_number = 0
+
+Created:        02/01/2025 PS 39579
+Modified:		10/07/2025 SP 42898 adding support for Availity claim procedure statuses
+                11/13/2025 PS 43839 updating claim_overpayment.outstanding_amount when an OP transaction is processed
+                01/15/2026 PS 44746 adding same bank account check for OP and donor claims  
+                06/24/2026 PS 46972 creating documentadjustment record for claim reversals
+                07/23/2026	KDW 	47355   query optimization for adjustment 
+                09/07/2026 PM      47664   Add PLB handling for PayMore/PaySame corrected claims
+**************************************************************************/
+BEGIN
+
+    SET NOCOUNT ON;
+
+    DECLARE @user_id INT;
+    DECLARE @start INT;
+    DECLARE @login_name VARCHAR(50);
+
+    SELECT @start = CHARINDEX('\', SUSER_SNAME());
+    SELECT @login_name = SUBSTRING(SUSER_SNAME(), @start + 1, LEN(SUSER_SNAME()) - @start);
+    SELECT @user_id = [sec_user_id]
+    FROM [dbo].[sec_user]
+    WHERE [login_name] = @login_name;
+    SELECT @user_id = ISNULL(@user_id, 0); --system 
+
+    DECLARE @sp_name VARCHAR(100) =
+            (
+                SELECT OBJECT_NAME(@@PROCID)
+            );
+    DECLARE @error_message NVARCHAR(MAX);
+    DECLARE @return_status INT = 0;
+
+    --========== GENERAL ==========
+    DECLARE @claim_net_amount MONEY = 0;
+    DECLARE @claim_vendor_id INT;
+    DECLARE @claim_vendor_ud VARCHAR(35);
+    DECLARE @claim_bank_account_id INT;
+    DECLARE @donor_claim_id INT = @claim_id;
+    DECLARE @donor_claim_net_amount MONEY;
+    DECLARE @claim_overpayment_id INT;
+    DECLARE @overpayment_amount MONEY;
+    DECLARE @overpayment_transaction_amount MONEY;
+    DECLARE @overpayment_claim_id INT;
+    DECLARE @overpayment_claim_ud VARCHAR(50);
+    DECLARE @overpayment_eligibility_ud VARCHAR(50);
+    DECLARE @overpayment_claim_procedure_id INT;
+    DECLARE @overpayment_revision_number INT;
+    DECLARE @overpayment_corrected_claim_id INT;
+    DECLARE @fadj_offset_corrected_claim_id INT;
+    DECLARE @fadj_offset_amount MONEY;
+    DECLARE @overpayment_closed BIT;
+    DECLARE @claim_2400_REF_6R VARCHAR(50);
+    DECLARE @checkbook_check_amount MONEY;
+    DECLARE @checkbook_check_netted_amount MONEY = 0;
+    DECLARE @vendor_tax_id VARCHAR(20);
+    DECLARE @ccx_vendor_tax_id VARCHAR(20) = '113454103'; -- CCX Real Tax ID: 113454103
+    DECLARE @claim_procedure_status_id INT =
+            (
+                SELECT [claim_procedure_status_id]
+                FROM [claim_procedure_status]
+                WHERE [claim_procedure_status_ud] = 'FADJ NET REFUND'
+            );
+    DECLARE @donor_employergroup_client_classification_type_id INT;
+    DECLARE @enable_ccx_op BIT = 0;
+    DECLARE @added_by VARCHAR(50);
+
+    --========== NETTING CONFIGURATION ==========
+    DECLARE @netting_transaction_type_id INT = 2; -- Transaction type = Recovery
+    DECLARE @netting_waiting_days INT = 45; -- Claims can't be netter before waiting period 
+    DECLARE @netting_procedure_code_ud VARCHAR(10) = '99999'; -- cOriginalProcedureCode
+    DECLARE @netting_adjustment_group_code VARCHAR(2) = 'CO'; -- cAdjustmentGroupCode 
+    DECLARE @netting_carc VARCHAR(5) = '129'; -- cAdjustmentReasonCode
+    DECLARE @netting_rarc VARCHAR(5) = 'N199'; -- cSvcRARC
+    DECLARE @netting_eob_ud VARCHAR(50) = 'CO129'; -- cOpenField1
+    DECLARE @netting_eob_nm VARCHAR(50) = ''; -- cOpenField2
+    DECLARE @netting_remark VARCHAR(50) = 'Netting Applied - ';
+
+    --========== Payment File Record Strings ==========
+    DECLARE @record VARCHAR(MAX);
+    DECLARE @docAdjRecord CHAR(648);
+    DECLARE @RecordId INT;
+    DECLARE @cRecorId INT;
+    DECLARE @tab CHAR = CHAR(9);
+    DECLARE @servicelinenumber INT;
+    DECLARE @claim_sequence_char CHAR(6);
+    DECLARE @servicelinesequence_char CHAR(6);
+    DECLARE @servicelinenumber_char CHAR(3);
+    DECLARE @claimrelationship_char CHAR(50);
+    DECLARE @adj_amount_char CHAR(15);
+
+    --========== DocumentAdjustment Record Fields ==========    
+    DECLARE @cRecordType CHAR(2) = '45';
+    DECLARE @cRecordVersion CHAR(2) = '01';
+    DECLARE @cAdjustmentReasonCode CHAR(2) = 'WO';
+    DECLARE @cAdjustmentDescription CHAR(100) = 'Overpayment Recovery';
+    DECLARE @cAdjustmentId CHAR(50) = LEFT(@claim_ud, 15);
+    DECLARE @cFiscalPeriodDate CHAR(8) = CONCAT(YEAR(GETDATE()), '12', '31');
+    DECLARE @cProviderId CHAR(50);
+    DECLARE @cAdjustmentAmount CHAR(15);
+    DECLARE @cAdjustmentPatientAccountNumber CHAR(40);
+    DECLARE @cAdjustmentGroupCode CHAR(50);
+    DECLARE @cAdjustmentSubNumber CHAR(50);
+    DECLARE @cAdjustmentClaimNumber CHAR(50) = @claim_ud;
+    DECLARE @cAdjustmentFromServiceDate CHAR(8);
+    DECLARE @cAdjustmentToServiceDate CHAR(8);
+
+
+    --========== TEMP TABLES ==========
+    DECLARE @Overpayment_ClaimNonDetail AS [dbo].[check_run_01_claimnondetail_type];
+    DECLARE @Overpayment_ServiceLine AS [dbo].[check_run_02_serviceline_type];
+    DECLARE @Overpayment_ServiceLineAdjustments AS [dbo].[check_run_32_ServiceLineAdjustments_type];
+    DECLARE @documentAdjustmentTable AS [dbo].[check_run_45_documentadj_type];
+    DELETE FROM @documentAdjustmentTable;
+
+	---47355 create temp table for claim_procedure values
+    DROP TABLE IF EXISTS [#claim_procedure];
+
+    CREATE TABLE [#claim_procedure]
+    (
+        [claim_id] INT,
+        [claim_procedure_id] INT,
+        [claim_procedure_status_id] INT
+    );
+
+    BEGIN TRY
+
+        -- Get vendor_tax_id, check amount from voucher 
+        SELECT @checkbook_check_amount = ISNULL([cc].[amount], 0),
+               @vendor_tax_id = [ve].[tax_id]
+        FROM [dbo].[voucher] [v]
+            INNER JOIN [dbo].[voucher_payment] [vp]
+                ON [vp].[voucher_id] = [v].[voucher_id]
+            INNER JOIN [dbo].[vendor] [ve]
+                ON [ve].[vendor_id] = [v].[vendor_id]
+            LEFT JOIN [dbo].[checkbook_check] [cc]
+                ON [vp].[checkbook_check_id] = [cc].[checkbook_check_id]
+        WHERE [v].[voucher_id] = @voucher_id;
+
+        -- Get Employergroup and Vendor information for this claim
+        SELECT TOP 1
+               @claim_vendor_id = [ve].[vendor_id],
+               @claim_vendor_ud = LTRIM([ve].[vendor_ud]),
+               @claim_bank_account_id = [cb].[bank_account_id],
+               @donor_employergroup_client_classification_type_id = [eg].[employergroup_client_classification_type_id],
+               @added_by = [cfsm].[added_by]
+        FROM [dbo].[claim] [c]
+            INNER JOIN [dbo].[claim_procedure] [cp]
+                ON [cp].[claim_id] = [c].[claim_id]
+            INNER JOIN [dbo].[voucher_claim_procedure_map] [vc]
+                ON [vc].[claim_procedure_id] = [cp].[claim_procedure_id]
+            INNER JOIN [dbo].[voucher] [v]
+                ON [v].[voucher_id] = [vc].[voucher_id]
+            INNER JOIN [dbo].[checkbook] [cb]
+                ON [cb].[checkbook_id] = [v].[checkbook_id]
+            INNER JOIN [dbo].[eligibility] [e]
+                ON [e].[eligibility_id] = [c].[eligibility_id]
+            INNER JOIN [dbo].[employergroup] [eg]
+                ON [eg].[employergroup_id] = [e].[employergroup_id]
+            INNER JOIN [dbo].[vendor] [ve]
+                ON [ve].[vendor_id] = [c].[vendor_id]
+            LEFT JOIN [dbo].[claim_file_source_map] [cfsm]
+                ON [cfsm].[claim_id] = [c].[claim_id]
+        WHERE [c].[claim_id] = @donor_claim_id;
+
+
+        -- Get Net Amount for this claim  
+        SELECT @claim_net_amount = SUM([cpb].[net_amount])
+        FROM [dbo].[claim_procedure] [cp]
+            INNER JOIN [dbo].[claim_procedure_benefit] [cpb]
+                ON [cpb].[claim_procedure_id] = [cp].[claim_procedure_id]
+        WHERE [cp].[claim_id] = @claim_id
+              AND [cpb].[deleted] = 0;
+
+			  --47355 add #claim_procedure table for optimization
+			INSERT INTO [#claim_procedure]
+			(
+				[claim_id],
+				[claim_procedure_id],
+				[claim_procedure_status_id]
+			)
+			SELECT [cp].[claim_id],
+				   [cp].[claim_procedure_id],
+				   [cp].[claim_procedure_status_id]
+			FROM [claim_procedure] [cp]
+			WHERE [claim_id] = @claim_id;
+
+        -- 47664 PayMore/PaySame corrected claims.
+        -- FADJOFFSET represents the previously paid amount that should be reported through PLB.
+        SELECT @fadj_offset_corrected_claim_id = [c].[claim_id],
+               @fadj_offset_amount = SUM(ISNULL([cpb].[net_amount], 0))
+        FROM [dbo].[claim] [c]
+            INNER JOIN [dbo].[claim_procedure] [cp47664]
+                ON [cp47664].[claim_id] = [c].[claim_id]
+            INNER JOIN [dbo].[claim_procedure_benefit] [cpb]
+                ON [cpb].[claim_procedure_id] = [cp47664].[claim_procedure_id]
+            INNER JOIN [dbo].[claim_procedure_eob] [cpe47664]
+                ON [cpe47664].[claim_procedure_id] = [cp47664].[claim_procedure_id]
+        WHERE [c].[claim_id] = @claim_id
+              AND [c].[revision_number] > 0
+              AND [cpb].[deleted] = 0
+              AND [cpe47664].[eob_id] = 1977 -- FADJOFFSET
+        GROUP BY [c].[claim_id];
+
+        -- Check if this claim an overpayment corrected claim
+        SELECT TOP 1
+               @overpayment_corrected_claim_id = [c].[claim_id],
+               @cAdjustmentId = LEFT([cpe].[additional_information], 50)
+        FROM [dbo].[claim] [c]
+            INNER JOIN [#claim_procedure] AS [cp]
+			ON [cp].[claim_id] = [c].[claim_id]
+            INNER JOIN [dbo].[claim_procedure_status] [cps]
+                ON [cps].[claim_procedure_status_id] = [cp].[claim_procedure_status_id]
+            INNER JOIN [dbo].[claim_procedure_eob] [cpe]
+                ON [cpe].[claim_procedure_id] = [cp].[claim_procedure_id]
+            INNER JOIN [dbo].[eob]
+                ON [eob].[eob_id] = [cpe].[eob_id]
+            INNER JOIN [dbo].[claim] [op]
+                ON [op].[claim_ud] = [c].[claim_ud]
+            INNER JOIN [dbo].[claim_overpayment] [co]
+                ON [co].[claim_id] = [op].[claim_id]
+        WHERE [c].[claim_id] = @claim_id
+              AND [c].[revision_number] > [op].[revision_number]
+              AND [cps].[claim_procedure_status_ud] IN ( 'FADJ REFUND', 'FADJ NET REFUND' )
+              AND [eob].[eob_ud] = 'F01'
+              AND [cpe].[additional_information] IS NOT NULL
+        ORDER BY [cp].[claim_procedure_id];
+
+        --SELECT @claim_id '@claim_id', @claim_ud '@claim_ud', @overpayment_corrected_claim_id '@overpayment_corrected_claim_id', @cAdjustmentId '@cAdjustmentId', @claim_net_amount '@claim_net_amount'
+
+        -- 47664 DocumentAdjustment records are EOP-only.
+        -- PaySame can have a $0 net payment and still requires a PLB entry.
+        IF @doc_type <> 'EOP'
+            RETURN;
+
+        IF ISNULL(@claim_net_amount, 0) = 0
+           AND @fadj_offset_corrected_claim_id IS NULL
+            RETURN;
+
+
+        -- ========== 47664 Create Document Adjustment Record for PayMore / PaySame Corrected Claims ==========
+        IF @fadj_offset_corrected_claim_id IS NOT NULL
+           AND ISNULL(@fadj_offset_amount, 0) <> 0
+        BEGIN
+
+            SET @cProviderId = @vendor_tax_id;
+            SET @cAdjustmentReasonCode = 'CS';
+            SET @cAdjustmentDescription = 'Adjustment';
+            SET @cAdjustmentId = LEFT(@claim_ud, 15);
+            SET @cAdjustmentAmount = CONVERT(VARCHAR(15), @fadj_offset_amount);
+
+
+            INSERT INTO @documentAdjustmentTable
+            (
+                [cRecordType],
+                [cRecordVersion],
+                [cDocId],
+                [cProviderId],
+                [cAdjustmentReasonCode],
+                [cAdjustmentDescription],
+                [cAdjustmentId],
+                [cAdjustmentAmount],
+                [cAdjustmentClaimNumber],
+                [cFiscalPeriodDate]
+            )
+            VALUES
+            (@cRecordType, @cRecordVersion, @doc_id, @cProviderId, @cAdjustmentReasonCode, @cAdjustmentDescription,
+             @cAdjustmentId, @cAdjustmentAmount, @cAdjustmentClaimNumber, @cFiscalPeriodDate);
+
+
+            SET @docAdjRecord =
+            (
+                SELECT TOP 1
+                       [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cProviderId] + @tab
+                       + [cFiscalPeriodDate] + @tab + [cAdjustmentReasonCode] + @tab + [cAdjustmentDescription] + @tab
+                       + [cAdjustmentId] + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentPatientName] + @tab
+                       + [cAdjustmentPatientFirstName] + @tab + [cAdjustmentPatientMiddleName] + @tab
+                       + [cAdjustmentPatientLastName] + @tab + [cAdjustmentPatientAccountNumber] + @tab
+                       + [cAdjustmentGroupCode] + @tab + [cAdjustmentSubNumber] + @tab + [cAdjustmentClaimNumber] + @tab
+                       + [cAdjustmentFromServiceDate] + @tab + [cAdjustmentToServiceDate]
+                FROM @documentAdjustmentTable
+            );
+
+
+            IF @docAdjRecord IS NOT NULL
+            BEGIN
+                EXEC [dbo].[check_run_45_documentadj_log_redcard] @check_run_id,
+                                                                  @voucher_id,
+                                                                  @doc_type,
+                                                                  @doc_id,
+                                                                  @donor_claim_id,
+                                                                  @claim_ud,
+                                                                  @documentAdjustmentTable;
+
+                EXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id,
+                                                                              @line_number OUTPUT,
+                                                                              @docAdjRecord,
+                                                                              1,
+                                                                              @user_id;
+            END;
+
+        END;
+        -- ========== 47664 Existing PayLess / Overpayment Corrected Claim ==========
+        ELSE IF @overpayment_corrected_claim_id IS NOT NULL
+           AND @cAdjustmentId IS NOT NULL
+        BEGIN
+
+            -- Set Adjustment Fields 
+            SET @cProviderId = @vendor_tax_id;
+            SET @cAdjustmentReasonCode = 'WO';
+            SET @cAdjustmentDescription = 'Overpayment Recovery';
+            SET @cAdjustmentAmount = CONVERT(VARCHAR(15), @claim_net_amount);
+
+
+            INSERT INTO @documentAdjustmentTable
+            (
+                [cRecordType],
+                [cRecordVersion],
+                [cDocId],
+                [cProviderId],
+                [cAdjustmentReasonCode],
+                [cAdjustmentDescription],
+                [cAdjustmentId],
+                [cAdjustmentAmount],
+                [cAdjustmentClaimNumber],
+                [cFiscalPeriodDate]
+            )
+            VALUES
+            (@cRecordType, @cRecordVersion, @doc_id, @cProviderId, @cAdjustmentReasonCode, @cAdjustmentDescription,
+             @cAdjustmentId, @cAdjustmentAmount, @cAdjustmentClaimNumber, @cFiscalPeriodDate);
+
+
+            --  INSERT DocumentAdjustment fields to Table Type 
+            SET @docAdjRecord =
+            (
+                SELECT TOP 1
+                       [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cProviderId] + @tab
+                       + [cFiscalPeriodDate] + @tab + [cAdjustmentReasonCode] + @tab + [cAdjustmentDescription] + @tab
+                       + [cAdjustmentId] + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentPatientName] + @tab
+                       + [cAdjustmentPatientFirstName] + @tab + [cAdjustmentPatientMiddleName] + @tab
+                       + [cAdjustmentPatientLastName] + @tab + [cAdjustmentPatientAccountNumber] + @tab
+                       + [cAdjustmentGroupCode] + @tab + [cAdjustmentSubNumber] + @tab + [cAdjustmentClaimNumber] + @tab
+                       + [cAdjustmentFromServiceDate] + @tab + [cAdjustmentToServiceDate]
+                FROM @documentAdjustmentTable
+            );
+
+
+            IF @docAdjRecord IS NOT NULL
+            BEGIN
+                -- Save documentAdjustmentTable row and check run parameters
+                EXEC [dbo].[check_run_45_documentadj_log_redcard] @check_run_id,
+                                                                  @voucher_id,
+                                                                  @doc_type,
+                                                                  @doc_id,
+                                                                  @donor_claim_id,
+                                                                  @claim_ud,
+                                                                  @documentAdjustmentTable;
+
+                -- Save record to check run batch
+                EXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id,
+                                                                              @line_number OUTPUT,
+                                                                              @docAdjRecord,
+                                                                              1,
+                                                                              @user_id;
+            END;
+
+        END;
+        -- ========== Create Document Adjustment Record for Claim Negates ==========
+        ELSE IF ISNULL(@added_by, '') = 'claim_negate'
+        BEGIN
+
+            -- Set Adjustment Fields 
+            SET @cProviderId = @vendor_tax_id;
+            SET @cAdjustmentReasonCode = 'CS';
+            SET @cAdjustmentDescription = 'Adjustment';
+            SET @cAdjustmentId = @claim_ud;
+            SET @cAdjustmentAmount = CONVERT(VARCHAR(15), @claim_net_amount);
+
+
+            INSERT INTO @documentAdjustmentTable
+            (
+                [cRecordType],
+                [cRecordVersion],
+                [cDocId],
+                [cProviderId],
+                [cAdjustmentReasonCode],
+                [cAdjustmentDescription],
+                [cAdjustmentId],
+                [cAdjustmentAmount],
+                [cAdjustmentClaimNumber],
+                [cFiscalPeriodDate]
+            )
+            VALUES
+            (@cRecordType, @cRecordVersion, @doc_id, @cProviderId, @cAdjustmentReasonCode, @cAdjustmentDescription,
+             @cAdjustmentId, @cAdjustmentAmount, @cAdjustmentClaimNumber, @cFiscalPeriodDate);
+
+
+            --  INSERT DocumentAdjustment fields to Table Type 
+            SET @docAdjRecord =
+            (
+                SELECT TOP 1
+                       [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cProviderId] + @tab
+                       + [cFiscalPeriodDate] + @tab + [cAdjustmentReasonCode] + @tab + [cAdjustmentDescription] + @tab
+                       + [cAdjustmentId] + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentPatientName] + @tab
+                       + [cAdjustmentPatientFirstName] + @tab + [cAdjustmentPatientMiddleName] + @tab
+                       + [cAdjustmentPatientLastName] + @tab + [cAdjustmentPatientAccountNumber] + @tab
+                       + [cAdjustmentGroupCode] + @tab + [cAdjustmentSubNumber] + @tab + [cAdjustmentClaimNumber] + @tab
+                       + [cAdjustmentFromServiceDate] + @tab + [cAdjustmentToServiceDate]
+                FROM @documentAdjustmentTable
+            );
+
+
+            IF @docAdjRecord IS NOT NULL
+            BEGIN
+                -- Save documentAdjustmentTable row and check run parameters
+                EXEC [dbo].[check_run_45_documentadj_log_redcard] @check_run_id,
+                                                                  @voucher_id,
+                                                                  @doc_type,
+                                                                  @doc_id,
+                                                                  @donor_claim_id,
+                                                                  @claim_ud,
+                                                                  @documentAdjustmentTable;
+
+                -- Save record to check run batch
+                EXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id,
+                                                                              @line_number OUTPUT,
+                                                                              @docAdjRecord,
+                                                                              1,
+                                                                              @user_id;
+            END;
+
+        END;
+        -- ========== Create Document Adjustment Record for NETTING ==========
+        ELSE IF @donor_employergroup_client_classification_type_id = 42
+                AND @vendor_tax_id <> @ccx_vendor_tax_id -- Only processing netting for Gatorcare
+        BEGIN
+
+            -- Get 2400_REF_6R code for this claim 
+            SELECT TOP 1
+                   @claim_2400_REF_6R = [r].[L2400_ref02_reference]
+            FROM [claim]
+                INNER JOIN [Edee].[dbo].[x12_837_2300] [c]
+                    ON [c].[x12_837_2300_id] = [claim].[x12_837_2300_id]
+                INNER JOIN [Edee].[dbo].[x12_837_2400] [cp]
+                    ON [c].[x12_837_2300_id] = [cp].[x12_837_2300_id]
+                INNER JOIN [Edee].[dbo].[x12_837_2400_REF] [r]
+                    ON [cp].[x12_837_2400_id] = [r].[x12_837_2400_id]
+            WHERE [claim].[claim_id] = @donor_claim_id
+                  AND [r].[L2400_ref01_code] = '6R'
+            ORDER BY [cp].[x12_837_2400_id];
+
+            SET @claim_2400_REF_6R = ISNULL(@claim_2400_REF_6R, '');
+
+
+            -- Get Net Amount for this claim  
+            SET @donor_claim_net_amount = @claim_net_amount;
+
+            -- ==================== BEGIN NETTING PRECESSING ====================================
+            -- If @donor_claim_net_amount is less than the @overpayment_amount, a partial netting transaction is created and overpayment status remains open 
+            -- If @donor_claim_net_amount is equal or greater than the @overpayment_amount, a full netting transaction is created and remainder amount is used the next overpaid claim  
+            WHILE @donor_claim_net_amount > 0
+            BEGIN
+
+                SET @claim_overpayment_id = NULL;
+                SET @overpayment_amount = NULL;
+                SET @overpayment_closed = NULL;
+
+                -- Search in [dbo].[claim_overpayment] table for an overpaid claim that can be satisfied by this donor claim 
+                SELECT TOP 1
+                       @claim_overpayment_id = [co].[claim_overpayment_id],
+                       @overpayment_amount = ([co].[overpayment_amount] - ISNULL([transactions].[amount], 0)),
+                       @overpayment_eligibility_ud = [e].[eligibility_ud],
+                       @overpayment_claim_id = [co].[claim_id],
+                       @overpayment_claim_ud = [c].[claim_ud],
+                       @overpayment_revision_number = [c].[revision_number],
+                       @overpayment_claim_procedure_id = [co].[claim_procedure_id]
+                FROM [dbo].[claim_overpayment] [co]
+                    INNER JOIN [dbo].[claim] [c]
+                        ON [c].[claim_id] = [co].[claim_id]
+                    INNER JOIN [dbo].[eligibility] [e]
+                        ON [e].[eligibility_id] = [c].[eligibility_id]
+                    INNER JOIN [dbo].[employergroup] [eg]
+                        ON [eg].[employergroup_id] = [e].[employergroup_id]
+                    INNER JOIN [dbo].[claim_procedure] [cp]
+                        ON [cp].[claim_id] = [c].[original_claim_id]
+                    INNER JOIN [dbo].[voucher_claim_procedure_map] [vc]
+                        ON [vc].[claim_procedure_id] = [cp].[claim_procedure_id]
+                    INNER JOIN [dbo].[voucher] [v]
+                        ON [v].[voucher_id] = [vc].[voucher_id]
+                    INNER JOIN [dbo].[checkbook] [cb]
+                        ON [cb].[checkbook_id] = [v].[checkbook_id]
+                    OUTER APPLY
+                (
+                    SELECT SUM([amount]) [amount]
+                    FROM [dbo].[claim_overpayment_transaction] [ot]
+                    WHERE [ot].[claim_overpayment_id] = [co].[claim_overpayment_id]
+                ) [transactions]
+                    OUTER APPLY
+                (
+                    SELECT TOP 1
+                           [tax_id]
+                    FROM [vendor]
+                    WHERE [vendor_id] = [co].[vendor_id]
+                ) [ve]
+                WHERE [co].[claim_overpayment_status_id] = 1 -- Open 
+                      AND [co].[ok_to_net_indicator] = 1
+                      AND [c].[claim_ud] <> @claim_ud
+                      AND [eg].[employergroup_client_classification_type_id] = 42 -- Only processing netting for: FB Master Claims Account
+                      AND [cb].[bank_account_id] = @claim_bank_account_id
+                      AND
+                      (
+                          (DATEDIFF(DAY, [co].[created_date], GETDATE()) >= @netting_waiting_days)
+                          OR EXISTS
+                             (
+                                 SELECT 1
+                                 FROM [claim_procedure] [cp2]
+                                 WHERE [cp2].[claim_id] = [c].[claim_id]
+                                       AND [cp2].[claim_procedure_status_id] IN ( 126, 130 )
+                             ) -- OVPMT PART STFD or AVL OVPMT NET to bypass WP	 
+                      )
+                      AND NOT EXISTS
+                              (
+                                  SELECT 1
+                                  FROM [claim_procedure] [cp3]
+                                  WHERE [cp3].[claim_id] = [c].[claim_id]
+                                        AND [cp3].[claim_procedure_status_id] = 128
+                              ) --42898 AVL OVPMT DSPT
+                      AND [ve].[tax_id] = @vendor_tax_id
+                      AND [ve].[tax_id] <> @ccx_vendor_tax_id
+                ORDER BY [co].[claim_overpayment_id] ASC;
+
+                -- ==================== BEGIN NETTING TRANSACTIONS ==============================
+                IF @claim_overpayment_id IS NOT NULL
+                BEGIN
+
+                    -- PARTIAL NETTING, LOG TRANSACTION BUT OVERPAYMENT REMAINS OPEN  
+                    IF @donor_claim_net_amount < @overpayment_amount
+                    BEGIN
+
+                        SET @overpayment_transaction_amount = @donor_claim_net_amount;
+                        SET @donor_claim_net_amount = 0;
+                    END;
+
+                    -- FULL NETTING AND OVERPAYMENT IS CLOSED
+                    ELSE IF @donor_claim_net_amount = @overpayment_amount
+                    BEGIN
+
+                        SET @overpayment_transaction_amount = @overpayment_amount;
+                        SET @donor_claim_net_amount = 0;
+                        SET @overpayment_closed = 1;
+                    END;
+
+                    -- FULL NETTING, LOG TRANSACTION AND OVERPAYMENT IS CLOSED
+                    ELSE IF @donor_claim_net_amount > @overpayment_amount
+                    BEGIN
+
+                        SET @overpayment_transaction_amount = @overpayment_amount;
+                        SET @donor_claim_net_amount = @donor_claim_net_amount - @overpayment_amount;
+                        SET @overpayment_closed = 1;
+                    END;
+
+
+                    -- ********************************************************************************
+                    -- Each netting transaction reduces the check amount to the provider. Only proceed if this  
+                    -- transaction does not drive the running total for current provider payment to exceed 
+                    -- the actual checkbook check amount. The check amount must always remain > $0
+                    -- *********************************************************************************
+                    SELECT @checkbook_check_netted_amount = SUM([ot].[amount])
+                    FROM [dbo].[claim_overpayment_transaction] [ot]
+                    WHERE [ot].[check_run_id] = @check_run_id
+                          AND [ot].[voucher_id] = @voucher_id;
+
+                    DECLARE @log VARCHAR(500)
+                        = CONCAT(
+                                    'Check Amount: ',
+                                    @checkbook_check_amount,
+                                    ' Netting Running: ',
+                                    ISNULL(@checkbook_check_netted_amount, 0),
+                                    ' Trans: ',
+                                    @overpayment_transaction_amount,
+                                    ' NEW SUM: ',
+                                    (ISNULL(@checkbook_check_netted_amount, 0) + @overpayment_transaction_amount)
+                                );
+                    IF (ISNULL(@checkbook_check_netted_amount, 0) + @overpayment_transaction_amount) >= @checkbook_check_amount
+                    BEGIN
+                        -- Exit 
+                        SET @log = @log + ' - STOP HERE';
+                        PRINT @log;
+                        GOTO PLB_Adjustments;
+                    END;
+
+                    SET @log = @log + ' - PASS';
+                    --PRINT @log
+
+                    -- =========== Log Transaction in [claim_overpayment_transaction] =========== 
+                    INSERT INTO [dbo].[claim_overpayment_transaction]
+                    (
+                        [claim_overpayment_id],
+                        [claim_overpayment_transaction_type_id],
+                        [donor_claim_id],
+                        [amount],
+                        [check_run_id],
+                        [voucher_id],
+                        [created_user],
+                        [created_date],
+                        [modified_user],
+                        [modified_date],
+                        [deleted]
+                    )
+                    SELECT @claim_overpayment_id,
+                           @netting_transaction_type_id,
+                           @donor_claim_id,
+                           @overpayment_transaction_amount,
+                           @check_run_id,
+                           @voucher_id,
+                           @login_name,
+                           GETDATE(),
+                           @login_name,
+                           GETDATE(),
+                           0;
+
+
+                    -- =========== Recalculate outstanding_amount [claim_overpayment] =========== 
+                    UPDATE [co]
+                    SET [co].[outstanding_amount] = [overpayment_amount]
+                                                    - ISNULL(
+                                                      (
+                                                          SELECT SUM([t].[amount])
+                                                          FROM [claim_overpayment_transaction] [t]
+                                                          WHERE [t].[claim_overpayment_id] = [co].[claim_overpayment_id]
+                                                      ),
+                                                      0
+                                                            )
+                    FROM [claim_overpayment] [co]
+                    WHERE [claim_overpayment_id] = @claim_overpayment_id;
+
+
+                    -- Add comments to both overpaid and donor claims 
+                    INSERT INTO [dbo].[claim_comment]
+                    (
+                        [claim_id],
+                        [comment],
+                        [active],
+                        [created_user_id],
+                        [modified_user_id],
+                        [deleted],
+                        [claim_comment_type_id]
+                    )
+                    VALUES
+                    (@overpayment_claim_id,
+                     CONCAT('Netting of: $', @overpayment_transaction_amount, ' from Claim: ', @donor_claim_id), 1,
+                     @user_id, @user_id, 0, 1);
+
+                    INSERT INTO [dbo].[claim_comment]
+                    (
+                        [claim_id],
+                        [comment],
+                        [active],
+                        [created_user_id],
+                        [modified_user_id],
+                        [deleted],
+                        [claim_comment_type_id]
+                    )
+                    VALUES
+                    (@donor_claim_id,
+                     CONCAT(
+                               'Netting of: $',
+                               @overpayment_transaction_amount,
+                               ' applied on Claim: ',
+                               @overpayment_claim_id
+                           ), 1, @user_id, @user_id, 0, 1);
+
+
+                    -- =========== Update claim_overpayment as Closed =========== 
+                    IF @overpayment_closed = 1
+                    BEGIN
+
+                        -- Get Corrected Claim Id
+                        SELECT TOP 1
+                               @overpayment_corrected_claim_id = [c].[claim_id]
+                        FROM [dbo].[claim] [c]
+                            INNER JOIN [dbo].[claim_procedure] [cp]
+                                ON [cp].[claim_id] = [c].[claim_id]
+                            INNER JOIN [dbo].[claim_procedure_status] [cps]
+                                ON [cps].[claim_procedure_status_id] = [cp].[claim_procedure_status_id]
+                        WHERE [c].[claim_ud] = @overpayment_claim_ud
+                              AND [c].[claim_id] > @overpayment_claim_id
+                              AND [cps].[claim_procedure_status_ud] IN ( 'FADJ VD/STOPPAY', 'FADJ REFUND',
+                                                                         'FADJ ADJUSTMENT', 'FADJ PRIOR CARR',
+                                                                         'FADJ SUBRO REF', 'FADJ NO PAY',
+                                                                         'FADJ NO CHECK', 'FADJ FC ACCUM',
+                                                                         'FADJ VD/SP DENY'
+                                                                       );
+
+
+                        -- Approve negated and corrected claims so they can close 
+                        UPDATE [dbo].[claim]
+                        SET [claim_workflow_id] = 3,
+                            [claim_financial_status_id] = 1
+                        WHERE [claim_id] IN ( @overpayment_claim_id, @overpayment_corrected_claim_id );
+
+                        -- Set overpayment status (closed) 
+                        UPDATE [dbo].[claim_overpayment]
+                        SET [claim_overpayment_status_id] = 2,
+                            [outstanding_amount] = 0
+                        WHERE [claim_overpayment_id] = @claim_overpayment_id;
+
+                        -- Set claim procedure status (OVPMT NET STFD)
+                        UPDATE [dbo].[claim_procedure]
+                        SET [claim_procedure_status_id] = 125
+                        WHERE [claim_procedure_id] = @overpayment_claim_procedure_id;
+
+                        -- Set new claim procedure status to other FADJ adjustments on overpaid and corrected claims (FADJ NET REFUND)
+                        UPDATE [cp]
+                        SET [cp].[claim_procedure_status_id] = @claim_procedure_status_id
+                        FROM [dbo].[claim] [c]
+                            INNER JOIN [dbo].[claim_procedure] [cp]
+                                ON [cp].[claim_id] = [c].[claim_id]
+                            INNER JOIN [dbo].[claim_procedure_status] [cps]
+                                ON [cps].[claim_procedure_status_id] = [cp].[claim_procedure_status_id]
+                        WHERE [c].[claim_ud] = @overpayment_claim_ud
+                              AND [c].[claim_id] >= @overpayment_claim_id
+                              AND [cp].[claim_procedure_id] <> @overpayment_claim_procedure_id
+                              AND [cps].[claim_procedure_status_ud] IN ( 'FADJ VD/STOPPAY', 'FADJ REFUND',
+                                                                         'FADJ ADJUSTMENT', 'FADJ PRIOR CARR',
+                                                                         'FADJ SUBRO REF', 'FADJ NO PAY',
+                                                                         'FADJ NO CHECK', 'FADJ FC ACCUM',
+                                                                         'FADJ VD/SP DENY'
+                                                                       );
+
+                    END;
+                    ELSE
+                    BEGIN
+                        -- Set claim procedure status (OVPMT PART STFD)
+                        UPDATE [dbo].[claim_procedure]
+                        SET [claim_procedure_status_id] = 126
+                        WHERE [claim_procedure_id] = @overpayment_claim_procedure_id;
+                    END;
+
+
+                    -- ======== Insert transaction into DocumentAdjustment table for PLB mapping ========
+                    SET @cProviderId = @claim_vendor_ud;
+                    SET @cAdjustmentAmount = CONVERT(VARCHAR(15), ISNULL(@overpayment_transaction_amount, 0));
+                    SET @cAdjustmentSubNumber = CONVERT(CHAR(50), @claim_overpayment_id);
+                    SET @cAdjustmentId = CONCAT(@overpayment_eligibility_ud, ' ', @overpayment_claim_ud);
+                    SET @cAdjustmentPatientAccountNumber = @overpayment_eligibility_ud;
+
+                    INSERT INTO @documentAdjustmentTable
+                    (
+                        [cRecordType],
+                        [cRecordVersion],
+                        [cDocId],
+                        [cProviderId],
+                        [cAdjustmentReasonCode],
+                        [cAdjustmentDescription],
+                        [cAdjustmentId],
+                        [cAdjustmentAmount],
+                        [cAdjustmentClaimNumber],
+                        [cAdjustmentSubNumber],
+                        [cAdjustmentPatientAccountNumber],
+                        [cFiscalPeriodDate]
+                    )
+                    VALUES
+                    (@cRecordType, @cRecordVersion, @doc_id, @cProviderId, @cAdjustmentReasonCode,
+                     @cAdjustmentDescription, @cAdjustmentId, @cAdjustmentAmount, @cAdjustmentClaimNumber,
+                     @cAdjustmentSubNumber, @cAdjustmentPatientAccountNumber, @cFiscalPeriodDate);
+
+
+
+                END; -- IF @claim_overpayment_id IS NOT NULL 
+                ELSE
+                BEGIN
+                    SET @donor_claim_net_amount = 0;
+                END;
+
+            END; -- WHILE @donor_claim_net_amount > 0
+
+            PLB_Adjustments:
+
+
+            IF EXISTS (SELECT 1 FROM @documentAdjustmentTable)
+            BEGIN
+                -- ===== Save all documentAdjustmentTable rows and check run parameters =====
+                EXEC [dbo].[check_run_45_documentadj_log_redcard] @check_run_id,
+                                                                  @voucher_id,
+                                                                  @doc_type,
+                                                                  @doc_id,
+                                                                  @donor_claim_id,
+                                                                  @claim_ud,
+                                                                  @documentAdjustmentTable;
+
+
+                -- ======== INSERT DocumentAdjustment Records in payment file  ========
+                WHILE
+                (SELECT COUNT(*)FROM @documentAdjustmentTable) > 0
+                BEGIN
+
+                    SELECT TOP 1
+                           @RecordId = [cRecordId]
+                    FROM @documentAdjustmentTable;
+
+                    SET @docAdjRecord =
+                    (
+                        SELECT [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cProviderId] + @tab
+                               + [cFiscalPeriodDate] + @tab + [cAdjustmentReasonCode] + @tab + [cAdjustmentDescription]
+                               + @tab + [cAdjustmentId] + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentPatientName]
+                               + @tab + [cAdjustmentPatientFirstName] + @tab + [cAdjustmentPatientMiddleName] + @tab
+                               + [cAdjustmentPatientLastName] + @tab + [cAdjustmentPatientAccountNumber] + @tab
+                               + [cAdjustmentGroupCode] + @tab + [cAdjustmentSubNumber] + @tab
+                               + [cAdjustmentClaimNumber] + @tab + [cAdjustmentFromServiceDate] + @tab
+                               + [cAdjustmentToServiceDate]
+                        FROM @documentAdjustmentTable
+                        WHERE [cRecordId] = @RecordId
+                    );
+
+                    IF @docAdjRecord IS NOT NULL
+                    BEGIN
+                        -- Save record to check run batch
+                        EXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id,
+                                                                                      @line_number OUTPUT,
+                                                                                      @docAdjRecord,
+                                                                                      1,
+                                                                                      @user_id;
+                    END;
+
+                    -- Delete record from DocumentAdjustment Table 
+                    DELETE FROM @documentAdjustmentTable
+                    WHERE [cRecordId] = @RecordId;
+
+                END; -- WHILE COUNT(*) > 0
+
+            END; -- EXISTS @documentAdjustmentTable
+
+        END;
+
+
+        -- ========== Create Document Adjustment Record for CCX Claims ==========
+        ELSE IF @donor_employergroup_client_classification_type_id = 42
+                AND @vendor_tax_id = @ccx_vendor_tax_id
+                AND @enable_ccx_op = 1
+        BEGIN
+
+            PRINT 'EOP & CCX: ' + @ccx_vendor_tax_id;
+
+            -----------------------------------------------  
+            -- CARECENTRIX Only - Overpayment Recovery  
+            -----------------------------------------------
+            DECLARE @recId INT;
+            DECLARE @cRecId INT;
+            DECLARE @total_count INT;
+            DECLARE @ctotal_count INT;
+            DECLARE @ccx_original_claim_id INT;
+            DECLARE @ccx_overpayment_claim_id INT;
+            DECLARE @ccx_overpayment_claim_ud VARCHAR(25);
+            DECLARE @ccx_overpayment_rev_number INT;
+            DECLARE @ccx_correction_claim_id INT;
+            DECLARE @ccx_correction_rev_number INT;
+            DECLARE @ccx_patient_number VARCHAR(100);
+            DECLARE @ccx_IsReversal BIT;
+            DECLARE @claim_number VARCHAR(50);
+            DECLARE @cTotalCharge MONEY;
+            DECLARE @cTotalPayment MONEY;
+            DECLARE @ccxAdjustmentGroupCode VARCHAR(2);
+            DECLARE @ccxAdjustmentReasonCode VARCHAR(5);
+            DECLARE @ccxLineItemControlNumber VARCHAR(50);
+            DECLARE @ccxOriginalProcedureCode VARCHAR(10);
+
+            DECLARE @ccx_claim_ids TABLE
+            (
+                [recordId] INT IDENTITY(1, 1),
+                [original_claim_id] INT,
+                [overpayment_claim_id] INT,
+                [overpayment_claim_ud] VARCHAR(50),
+                [overpayment_rev_number] INT,
+                [correction_claim_id] INT,
+                [correction_rev_number] INT,
+                [patient_number] VARCHAR(100),
+                [IsReversal] BIT
+            );
+            WITH [CCXClaimsWithOverpayments]
+            AS (SELECT [c].[claim_ud],
+                       [c].[claim_id] AS [overpayment_claim_id],
+                       [c].[revision_number],
+                       [c].[patient_number],
+                       [c].[original_claim_id],
+                       [c2].[correction_claim_id],
+                       [c2].[correction_rev_number]
+                FROM [dbo].[claim] [c]
+                    INNER JOIN [dbo].[claim_overpayment] [co]
+                        ON [c].[claim_id] = [co].[claim_id]
+                    INNER JOIN [dbo].[vendor] [v]
+                        ON [v].[vendor_id] = [c].[vendor_id]
+                    INNER JOIN [dbo].[eligibility] [e]
+                        ON [e].[eligibility_id] = [c].[eligibility_id]
+                    INNER JOIN [dbo].[employergroup] [eg]
+                        ON [eg].[employergroup_id] = [e].[employergroup_id]
+                    OUTER APPLY
+                (
+                    SELECT TOP 1
+                           [c2].[claim_id] AS [correction_claim_id],
+                           [c2].[revision_number] AS [correction_rev_number]
+                    FROM [dbo].[claim] [c2]
+                        INNER JOIN [dbo].[claim_procedure] [cp]
+                            ON [cp].[claim_id] = [c2].[claim_id]
+                        INNER JOIN [dbo].[claim_procedure_status] [cps]
+                            ON [cps].[claim_procedure_status_id] = [cp].[claim_procedure_status_id]
+                    WHERE [c2].[claim_ud] = [c].[claim_ud]
+                          AND [c2].[claim_id] > [c].[claim_id]
+                          AND [cps].[claim_procedure_status_ud] IN ( 'FADJ VD/STOPPAY', 'FADJ ADJUSTMENT',
+                                                                     'FADJ SUBRO REF', 'FADJ FC ACCUM',
+                                                                     'FADJ VD/SP DENY', 'FADJ RFND BCBS',
+                                                                     'FADJ FB REFUND'
+                                                                   )
+                ) [c2]
+                WHERE [v].[tax_id] = '113454103'
+                      AND [eg].[employergroup_client_classification_type_id] = 42
+                      AND [co].[claim_overpayment_status_id] = 1
+                      AND [c].[original_claim_id] <> 104194652
+                      AND [c].[original_claim_id] IN
+                          (
+                              SELECT [claim_id]
+                              FROM [dbo].[check_run_01_claimnondetail]
+                              WHERE [doc_type] = 'EOP'
+                          )
+                      AND [c].[claim_id] NOT IN
+                          (
+                              SELECT [claim_id]
+                              FROM [dbo].[check_run_01_claimnondetail]
+                              WHERE LEFT([cClaimStatusCode], 1) = '4'
+                          )
+                      AND [c2].[correction_claim_id] IS NOT NULL)
+
+            -- INSERT REVERSAL RECORDS 
+            INSERT INTO @ccx_claim_ids
+            (
+                [original_claim_id],
+                [overpayment_claim_id],
+                [overpayment_claim_ud],
+                [overpayment_rev_number],
+                [correction_claim_id],
+                [correction_rev_number],
+                [patient_number],
+                [IsReversal]
+            )
+            SELECT DISTINCT
+                   [op].[original_claim_id],
+                   [op].[overpayment_claim_id],
+                   [op].[claim_ud],
+                   [op].[revision_number],
+                   [op].[correction_claim_id],
+                   [op].[correction_rev_number],
+                   [op].[patient_number],
+                   1
+            FROM [CCXClaimsWithOverpayments] [op]
+            WHERE EXISTS
+            (
+                SELECT 1
+                FROM [dbo].[check_run_01_claimnondetail] [d]
+                    INNER JOIN [dbo].[check_run_02_serviceline] [s]
+                        ON [s].[claim_id] = [d].[claim_id]
+                    INNER JOIN [dbo].[check_run_32_ServiceLineAdjustments] [adj]
+                        ON [adj].[claim_id] = [d].[claim_id]
+                WHERE [d].[claim_id] = [op].[original_claim_id]
+                      AND [d].[doc_type] IN ( 'EOP' )
+            );
+
+
+            -- INSERT DENIAL RECORDS
+            INSERT INTO @ccx_claim_ids
+            SELECT [original_claim_id],
+                   [overpayment_claim_id],
+                   [overpayment_claim_ud],
+                   [overpayment_rev_number],
+                   [correction_claim_id],
+                   [correction_rev_number],
+                   [patient_number],
+                   0
+            FROM @ccx_claim_ids;
+
+
+
+            SET @total_count =
+            (
+                SELECT COUNT(*)FROM @ccx_claim_ids
+            );
+            SET @recId = 1;
+
+            -----------------------------------------------------------------------------------
+            -- LOOP THROUGH CCX CLAIM OVERPAYMENTS - ADD REVERSAL RECORDS 
+            -----------------------------------------------------------------------------------
+            WHILE @recId <= @total_count
+            BEGIN
+
+                SELECT @ccx_original_claim_id = [original_claim_id],
+                       @ccx_overpayment_claim_id = [overpayment_claim_id],
+                       @ccx_overpayment_claim_ud = [overpayment_claim_ud],
+                       @ccx_overpayment_rev_number = [overpayment_rev_number],
+                       @ccx_correction_claim_id = [correction_claim_id],
+                       @ccx_correction_rev_number = [correction_rev_number],
+                       @ccx_patient_number = [patient_number],
+                       @ccx_IsReversal = [IsReversal]
+                FROM @ccx_claim_ids
+                WHERE [recordId] = @recId;
+
+                SET @claim_sequence = @claim_sequence + 1;
+                SET @claim_sequence_char = RIGHT(CONCAT('000000', @claim_sequence), 6);
+                SET @claim_number = CONCAT(   @ccx_overpayment_claim_ud,
+                                              'R',
+                                              CASE
+                                                  WHEN @ccx_IsReversal = 1 THEN
+                                                      @ccx_overpayment_rev_number
+                                                  ELSE
+                                                      @ccx_correction_rev_number
+                                              END
+                                          );
+
+                --=============================================================================================================
+                -- ======  STEP 1: Reverse previously oververpaid claim using Claim Status Code = 22
+                --=============================================================================================================
+                DELETE FROM @Overpayment_ClaimNonDetail;
+
+                -- Get previous ClaimNondetail Record from log table
+                INSERT INTO @Overpayment_ClaimNonDetail
+                EXEC [dbo].[check_run_log_extract_redcard] 'check_run_01_claimnondetail',
+                                                           @ccx_original_claim_id;
+
+                -- Update ClaimStatusCode and new file sequence numbers before inserting New ClaimNonDetail Record  
+                UPDATE @Overpayment_ClaimNonDetail
+                SET [cDocId] = @doc_id,
+                    [cClaimSequence] = @claim_sequence_char,
+                    [cClaimNumber] = @claim_number,
+                    [cClaimRelationString] = @claim_number,
+                    [cClaimStatusCode] = CASE
+                                             WHEN @ccx_IsReversal = 1 THEN
+                                                 '22'
+                                             ELSE
+                                                 '4'
+                                         END;
+
+
+                -- Build Record String
+                SET @record =
+                (
+                    SELECT TOP 1
+                           CAST([cRecordType] AS VARCHAR(MAX)) + @tab + [cRecordVersion] + @tab + [cDocId] + @tab
+                           + [cClaimSequence] + @tab + [cClaimNumber] + @tab + [cEnrolleeName] + @tab
+                           + [cEnrolleeLastName] + @tab + [cEnrolleeId] + @tab + [cEnrolleeSocial] + @tab
+                           + [cEnrolleePolicyNumber] + @tab + [cEnrolleeAddress1] + @tab + [cEnrolleeAddress2] + @tab
+                           + [cEnrolleeAddress3] + @tab + [cEnrolleeAddress4] + @tab + [cPatientName] + @tab
+                           + [cPatientId] + @tab + [cPatientAccountNumber] + @tab + [cDependentNumber] + @tab
+                           + [cPatientRelationship] + @tab + [cReceivedDate] + @tab + [cProcessedDate] + @tab
+                           + [cPaidDate] + @tab + [cServiceDateStart] + @tab + [cServiceDateEnd] + @tab + [cProcessorId]
+                           + @tab + [cProcessorName] + @tab + [cClaimYear] + @tab + [cGroupHierarchy1] + @tab
+                           + [cGroupName1] + @tab + [cGroupHierarchy2] + @tab + [cGroupName2] + @tab + [cGroupHierarchy3]
+                           + @tab + [cGroupName3] + @tab + [cGroupHierarchy4] + @tab + [cGroupName4] + @tab
+                           + [cGroupHierarchy5] + @tab + [cGroupName5] + @tab + [cGroupHierarchy6] + @tab + [cGroupName6]
+                           + @tab + [cGroupHierarchy7] + @tab + [cGroupName7] + @tab + [cGroupHierarchy8] + @tab
+                           + [cGroupName8] + @tab + [cGroupHierarchy9] + @tab + [cGroupName9] + @tab + [cGroupHierarchy10]
+                           + @tab + [cGroupName10] + @tab + [cGroupAddress1] + @tab + [cGroupAddress2] + @tab
+                           + [cGroupAddress3] + @tab + [cGroupAddress4] + @tab + [cGroupCity] + @tab + [cGroupState]
+                           + @tab + [cGroupZip] + @tab + [cGroupZipFour] + @tab + [cProviderTaxId] + @tab
+                           + [cProviderSubTaxId] + @tab + [cAltProviderId] + @tab + [cNationalProviderId] + @tab
+                           + [cBillingNPI] + @tab + [cRenderingPhysicianNPI] + @tab + [cProviderName] + @tab
+                           + [cProviderAddress1] + @tab + [cProviderAddress2] + @tab + [cProviderAddress3] + @tab
+                           + [cOpenField1] + @tab + [cOpenField2] + @tab + [cOpenField3] + @tab + [cOpenAmount1] + @tab
+                           + [cOpenAmount2] + @tab + [cOpenAmount3] + @tab + [cVoucherNumber] + @tab + [cNetwork] + @tab
+                           + [cBillingCode] + @tab + [cOpenField4] + @tab + [cOpenField5] + @tab + [cClaimRelationString]
+                           + @tab + [cEnrolleeCity] + @tab + [cEnrolleeState] + @tab + [cEnrolleeZip] + @tab
+                           + [cProviderCity] + @tab + [cProviderState] + @tab + [cProviderZip] + @tab
+                           + [cPPOContractNumber] + @tab + [cPatientDateOfBirth] + @tab + [cAdjustments] + @tab
+                           + [cFormLetterName] + @tab + [cFormLetterId] + @tab + [cOpenField6] + @tab + [cOpenField7]
+                           + @tab + [cOpenField8] + @tab + [cOpenField9] + @tab + [cOpenField10] + @tab
+                           + [cClaimFilingIndicatorCode] + @tab + [cClaimFrequencyTypeCode] + @tab + [cClaimStatusCode]
+                           + @tab + [cCorrectedEnrolleeID] + @tab + [cCorrectedEnrolleeName] + @tab
+                           + [cCorrectedPatientID] + @tab + [cCorrectedPatientName] + @tab + [cCoverageExpirationDate]
+                           + @tab + [cDRGCode] + @tab + [cDRGWeight] + @tab + [cInterest] + @tab + [cNCPDPPharmacyNumber]
+                           + @tab + [cPatientPaidAmount] + @tab + [cEnrolleeFirstName] + @tab + [cEnrolleeMiddleName]
+                           + @tab + [cPatientFirstName] + @tab + [cPatientMiddleName] + @tab + [cPatientLastName] + @tab
+                           + [cProviderFirstName] + @tab + [cProviderMiddleName] + @tab + [cProviderLastName] + @tab
+                           + [cCorrectedEnrolleeFirstName] + @tab + [cCorrectedEnrolleeMiddleName] + @tab
+                           + [cCorrectedEnrolleeLastName] + @tab + [cCorrectedPatientFirstName] + @tab
+                           + [cCorrectedPatientMiddleName] + @tab + [cCorrectedPatientLastName] + @tab + [cBundling]
+                           + @tab + [cNetworkName] + @tab + [cAlternateClaimNumber] + @tab + [cOpenField11] + @tab
+                           + [cOpenField12] + @tab + [cOpenField13] + @tab + [cOpenField14] + @tab + [cOpenField15] + @tab
+                           + [cEnrolleeSuffix] + @tab + [cPatientSuffix] + @tab + [cProviderSuffix] + @tab + SPACE(20)
+                           + @tab + SPACE(20) + @tab + SPACE(20) + @tab + SPACE(20) + @tab + SPACE(15) + @tab + SPACE(256)
+                           + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50)
+                           + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(50)
+                           + @tab + SPACE(3) + @tab + SPACE(1) + @tab + SPACE(20) + @tab + SPACE(16) + @tab + SPACE(15)
+                           + @tab + SPACE(15) + @tab + SPACE(10) + @tab + SPACE(100) + @tab + SPACE(100) + @tab
+                           + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100)
+                           + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(9) + @tab
+                           + SPACE(60) + @tab + SPACE(15) + @tab + SPACE(40) + @tab + SPACE(2) + @tab + SPACE(1) + @tab
+                           + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100) + @tab + SPACE(100)
+                           + @tab + SPACE(50) + @tab + SPACE(60) + @tab + SPACE(256) + @tab + SPACE(256) + @tab
+                           + SPACE(256) + @tab + SPACE(256) + @tab + SPACE(50) + @tab + SPACE(1) + @tab + SPACE(60) + @tab
+                           + SPACE(10) + @tab + SPACE(10) + @tab + SPACE(10) + @tab + SPACE(30) + @tab + SPACE(10) + @tab
+                           + SPACE(60) + @tab + SPACE(10) + @tab + SPACE(10) + @tab + SPACE(10) + @tab + SPACE(30) + @tab
+                           + SPACE(10) + @tab + SPACE(30) + @tab + SPACE(30) + @tab + SPACE(50) + @tab + SPACE(30) + @tab
+                           + SPACE(80) + @tab + SPACE(30) + @tab + SPACE(30) + @tab + SPACE(25) + @tab + SPACE(10) + @tab
+                           + SPACE(10) + @tab + SPACE(20) + @tab + SPACE(15) + @tab + SPACE(8) + @tab + SPACE(50) + @tab
+                           + SPACE(50) + @tab + SPACE(50) + @tab + SPACE(2) + @tab + SPACE(50) + @tab + SPACE(50) + @tab
+                           + SPACE(50)
+                    FROM @Overpayment_ClaimNonDetail
+                );
+
+                PRINT ISNULL(@record, 'NULL');
+                IF @record IS NULL
+                    RETURN;
+
+                -- Save data fields and check run parameters 
+                EXEC [dbo].[check_run_01_claimnondetail_log_redcard] @check_run_id,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     @ccx_overpayment_claim_id,
+                                                                     'EOP',
+                                                                     @doc_id,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     @claim_sequence,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     NULL,
+                                                                     @Overpayment_ClaimNonDetail;
+
+                EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                        @line_number OUTPUT,
+                                                                        @record,
+                                                                        1,
+                                                                        @user_id;
+
+
+                --IF @return_status <> 0  
+                --BEGIN  
+                --     RAISERROR('Fatal Error 1', 16, 1)   
+                --END
+
+                --=============================================================================================================
+                -- ====== STEP 2: Reverse all line level dollar amounts except for Patient Responsibility
+                --=============================================================================================================
+                DELETE FROM @Overpayment_ServiceLine;
+
+                -- Get previous ClaimNondetail Record from log table
+                INSERT INTO @Overpayment_ServiceLine
+                EXEC [dbo].[check_run_log_extract_redcard] 'check_run_02_serviceline',
+                                                           @ccx_original_claim_id;
+
+
+
+                SET @ctotal_count =
+                (
+                    SELECT COUNT(*)FROM @Overpayment_ServiceLine
+                );
+                SET @cTotalCharge =
+                (
+                    SELECT SUM(CONVERT(MONEY, [cTotalCharge]))
+                    FROM @Overpayment_ServiceLine
+                );
+                SET @cTotalPayment =
+                (
+                    SELECT SUM(CONVERT(MONEY, [cPayment]))FROM @Overpayment_ServiceLine
+                );
+
+                SET @cRecId = 1;
+                SET @servicelinenumber = 0;
+
+                -- LOOP THROUGH SERVICE LINES 
+                WHILE @cRecId <= @ctotal_count
+                BEGIN
+
+                    SET @servicelinesequence = @servicelinesequence + 1;
+                    SET @servicelinesequence_char = RIGHT(CONCAT('000000', @servicelinesequence), 6);
+
+                    SET @servicelinenumber = @servicelinenumber + 1;
+                    SET @servicelinenumber_char = RIGHT(CONCAT('000', @servicelinenumber), 3)
+
+                    -- Reverse Service Line totals  
+                    ;
+                    WITH [Overpayment_ServiceLine]
+                    AS (SELECT *,
+                               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [rn]
+                        FROM @Overpayment_ServiceLine)
+                    UPDATE [Overpayment_ServiceLine]
+                    SET [cDocId] = @doc_id,
+                        [cClaimSequence] = @claim_sequence_char,
+                        [cClaimRelationString] = @claim_number,
+                        [cServiceLineSequence] = @servicelinesequence_char,
+                        [cPatientResponsibility] = CASE
+                                                       WHEN @ccx_IsReversal = 1 THEN
+                                                           ''
+                                                       ELSE
+                                                           [cTotalCharge]
+                                                   END,
+                        [cClaimNumber] = CASE
+                                             WHEN @cRecId = 1 THEN
+                                                 @claim_number
+                                             ELSE
+                                                 ''
+                                         END,
+                        [cUnits] = CASE
+                                       WHEN @ccx_IsReversal = 1 THEN
+                                           CAST(CONVERT(INT, [cUnits]) * -1 AS VARCHAR)
+                                       ELSE
+                                           [cUnits]
+                                   END,
+                        [cAllowed] = CASE
+                                         WHEN @ccx_IsReversal = 1 THEN
+                                             CAST(CONVERT(MONEY, [cAllowed]) * -1 AS VARCHAR)
+                                         ELSE
+                                             [cAllowed]
+                                     END,
+                        [cDiscount] = CASE
+                                          WHEN @ccx_IsReversal = 1 THEN
+                                              CAST(CONVERT(MONEY, [cDiscount]) * -1 AS VARCHAR)
+                                          ELSE
+                                              [cDiscount]
+                                      END,
+                        [cTotalCharge] = CASE
+                                             WHEN @ccx_IsReversal = 1 THEN
+                                                 CAST(CONVERT(MONEY, [cTotalCharge]) * -1 AS VARCHAR)
+                                             ELSE
+                                                 [cTotalCharge]
+                                         END,
+                        [cOtherAmount10] = CASE
+                                               WHEN @ccx_IsReversal = 1 THEN
+                                                   CAST(CONVERT(MONEY, [cPayment]) * -1 AS VARCHAR)
+                                               ELSE
+                                                   '0.00'
+                                           END,
+                        [cPayment] = CASE
+                                         WHEN @ccx_IsReversal = 1 THEN
+                                             CAST(CONVERT(MONEY, [cPayment]) * -1 AS VARCHAR)
+                                         ELSE
+                                             '0.00'
+                                     END,
+                        [cProcedureModifier] = ISNULL(
+                                               (
+                                                   SELECT TOP 1
+                                                          CONCAT_WS(
+                                                                       ':',
+                                                                       [modifier_1],
+                                                                       [modifier_2],
+                                                                       [modifier_3],
+                                                                       [modifier_4]
+                                                                   )
+                                                   FROM [claim_procedure] [cp]
+                                                   WHERE [cp].[claim_id] = (CASE
+                                                                                WHEN @ccx_IsReversal = 1 THEN
+                                                                                    @ccx_overpayment_claim_id
+                                                                                ELSE
+                                                                                    @ccx_correction_claim_id
+                                                                            END
+                                                                           )
+                                                         AND RIGHT(RTRIM([cp].[procedurecode_ud]), 3) = RIGHT(RTRIM([cProcedureCode]), 3)
+                                               ),
+                                               ''
+                                                     )
+                    WHERE [rn] = @cRecId;
+                    WITH [Overpayment_ServiceLine2]
+                    AS (SELECT *,
+                               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [rn]
+                        FROM @Overpayment_ServiceLine)
+
+                    -- Build Record String
+                    SELECT @record
+                        =
+                        (
+                            SELECT [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cClaimSequence]
+                                   + @tab + [cClaimNumber] + @tab + [cServiceLineSequence] + @tab + [cLineNumber]
+                                   + @tab + [cTypeofService] + @tab + [cProcedureCode] + @tab + [cPlaceofService]
+                                   + @tab + [cUnits] + @tab + [cProcedure] + @tab + [cServiceDateStart] + @tab
+                                   + [cServiceDateEnd] + @tab + [cTotalCharge] + @tab + [cDiscount] + @tab
+                                   + [cIneligible] + @tab + [cPended] + @tab + [cAllowed] + @tab + [cNotesCode1] + @tab
+                                   + [cNotesCode2] + @tab + [cNotesCode3] + @tab + [cDeductible] + @tab + [cCopay]
+                                   + @tab + [cCoinsurance] + @tab + [cBalance] + @tab + [cPercent] + @tab
+                                   + [cOtherCarrier] + @tab + [cPayment] + @tab + [cPatientResponsibility] + @tab
+                                   + [cDescription] + @tab + [cToothNumber] + @tab + [cToothSurface] + @tab
+                                   + [cPatientAccountNumber] + @tab + [cRXNumber] + @tab + [cOtherAmount1] + @tab
+                                   + [cOtherAmount2] + @tab + [cOtherAmount3] + @tab + [cOtherAmount4] + @tab
+                                   + [cOtherAmount5] + @tab + [cOpenField1] + @tab + [cOpenField2] + @tab
+                                   + [cOpenField3] + @tab + [cOpenField4] + @tab + [cOpenField5] + @tab
+                                   + [cClaimRelationString] + @tab + [cReasonableAndCustomary] + @tab + [cCobAllowed]
+                                   + @tab + [cPPOContractNumber] + @tab + [cOverReasonableAndCustomary] + @tab
+                                   + [cNotesCode4] + @tab + [cNotesCode5] + @tab + [cNotesCode1IsPatientReponsibility]
+                                   + @tab + [cNotesCode2IsPatientReponsibility] + @tab
+                                   + [cNotesCode3IsPatientReponsibility] + @tab + [cNotesCode4IsPatientReponsibility]
+                                   + @tab + [cNotesCode5IsPatientReponsibility] + @tab + [cMedicareAssignment] + @tab
+                                   + [cProcedureModifier] + @tab + [cPenalty] + @tab + [cNotesCode1Type] + @tab
+                                   + [cNotesCode2Type] + @tab + [cNotesCode3Type] + @tab + [cNotesCode4Type] + @tab
+                                   + [cNotesCode5Type] + @tab + [cAlternateProcedureCode] + @tab + [cServiceQualifer]
+                                   + @tab + [cSvcAdjustmentAmount] + @tab + [cSvcAdjustmentGroupCode] + @tab
+                                   + [cSvcAdjustmentReasonCode] + @tab + [cSvcRARC] + @tab + [cLineItemControlNumber]
+                                   + @tab + [cOriginalProcedureCode] + @tab + [cOtherAmount6] + @tab + [cOtherAmount7]
+                                   + @tab + [cOtherAmount8] + @tab + [cOtherAmount9] + @tab + [cOtherAmount10] + @tab
+                                   + [cOtherAmount11] + @tab + [cOtherAmount12] + @tab + [cOtherAmount13] + @tab
+                                   + [cICDCode] + @tab + [cPaymentProvider] + @tab + [cPaymentEnrollee] + @tab
+                                   + [cCOBDeductible] + @tab + [cCOBCredit] + @tab + [cDiagnosisCode1] + @tab
+                                   + [cDiagnosisCode2] + @tab + [cDiagnosisCode3] + @tab + [cDiagnosisCode4] + @tab
+                                   + [cDiagnosisCode5] + @tab + [cProviderName] + @tab + [cOpenField6] + @tab
+                                   + [cOpenField7] + @tab + [cOpenField8] + @tab + [cOpenField9] + @tab
+                                   + [cOpenField10] + @tab + [cOtherAmount14] + @tab + [cOtherAmount15] + @tab
+                                   + [cOtherAmount16] + @tab + [cOtherAmount17] + @tab + [cOtherAmount18] + @tab
+                                   + [cOtherAmount19] + @tab + [cNetCoveredDiscountAmount] + @tab + [cPPOName] + @tab
+                                   + [cRevenueCode] + @tab + [cNationalDrugCode] + @tab + [cWithheldAmount] + @tab
+                                   + [cDoNotSendToPaymentsVendor] + @tab + [cTax] + @tab
+                                   + [cSubmittedProcedureModifier1] + @tab + [cSubmittedProcedureModifier2] + @tab
+                                   + [cSubmittedProcedureModifier3] + @tab + [cSubmittedProcedureModifier4] + @tab
+                                   + [cAdjudicatedProcedureModifier1] + @tab + [cAdjudicatedProcedureModifier2] + @tab
+                                   + [cAdjudicatedProcedureModifier3] + @tab + [cAdjudicatedProcedureModifier4] + @tab
+                                   + [cOriginalUnitsService] + @tab + [cPreviouslyPaidAmount] + @tab
+                                   + [cQualifyingPaymentAmount] + @tab + [cNSAConsentReceived] + @tab
+                                   + [cClaimRevisionNumber] + @tab + [cOtherAmount20] + @tab + [cOtherAmount21] + @tab
+                                   + [cOtherAmount22] + @tab + [cOpenField11] + @tab + [cOpenField12] + @tab
+                                   + [cOpenField13] + @tab + [cQPAWriteOffAmount] + @tab + [cOriginalServiceQualifier]
+                                   + @tab + [c835HealthCarePolicyID1] + @tab + [c835HealthCarePolicyID2] + @tab
+                                   + [c835HealthCarePolicyID3] + @tab + [c835HealthCarePolicyID4] + @tab
+                                   + [c835HealthCarePolicyID5] + @tab + [c835APGNumber] + @tab
+                                   + [c835AmbulatoryPaymentClassification] + @tab + [cSequestration] + @tab
+                                   + [cAuthorizationNumber] + @tab + [cPriorAuthorizationNumber] + @tab
+                                   + [c835AllowedActual] + @tab + [cSplitLineCounter]
+                            FROM [Overpayment_ServiceLine2]
+                            WHERE [rn] = @cRecId
+                        );
+
+                    IF @record IS NOT NULL
+                    BEGIN
+                        EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                                @line_number OUTPUT,
+                                                                                @record,
+                                                                                1,
+                                                                                @user_id;
+                    END;
+
+                    --IF @return_status <> 0  
+                    --BEGIN  
+                    --     RAISERROR('Fatal Error 2', 16, 1)   
+                    --END
+
+                    -- Go to next Service Line 
+                    SET @cRecId = @cRecId + 1;
+                END;
+
+                -- Save ALL SERVICE LINES data fields and check run parameters 
+                EXEC [dbo].[check_run_02_serviceline_log_redcard] @check_run_id,
+                                                                  @voucher_id,
+                                                                  @ccx_overpayment_claim_id,
+                                                                  @ccx_overpayment_claim_ud,
+                                                                  @doc_type,
+                                                                  @doc_id,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  NULL,
+                                                                  @Overpayment_ServiceLine;
+
+                --=============================================================================================================
+                -- ====== STEP 3: Reverse all service line adjustment amounts 
+                --=============================================================================================================
+                DELETE FROM @Overpayment_ServiceLineAdjustments;
+
+                IF @ccx_IsReversal = 1
+                BEGIN
+                    -- Get all previous adjustments to reverse them 
+                    INSERT INTO @Overpayment_ServiceLineAdjustments
+                    EXEC [dbo].[check_run_log_extract_redcard] 'check_run_32_servicelineadjustments',
+                                                               @ccx_original_claim_id;
+                END;
+                ELSE -- Denial 
+                BEGIN
+
+                    SET @ccxAdjustmentGroupCode = 'PR';
+                    SET @ccxAdjustmentReasonCode = '27';
+
+                    SELECT @ccxAdjustmentGroupCode = [eob].[era_adjustment_group],
+                           @ccxAdjustmentReasonCode = [eob].[era_adjustment_reason_code]
+                    FROM [dbo].[claim_overpayment] [co]
+                        INNER JOIN [claim_procedure_eob] [cpe]
+                            ON [cpe].[claim_procedure_eob_id] = [co].[claim_procedure_eob_id]
+                        INNER JOIN [dbo].[eob]
+                            ON [eob].[eob_id] = [cpe].[eob_id]
+                    WHERE [co].[claim_id] = @ccx_overpayment_claim_id
+                          AND [eob].[era_adjustment_group] IS NOT NULL
+                          AND [eob].[era_adjustment_reason_code] IS NOT NULL;
+
+
+                    --SELECT TOP 1 @ccxLineItemControlNumber = cLineItemControlNumber, 
+                    --              @ccxOriginalProcedureCode = cOriginalProcedureCode 
+                    --FROM [dbo].[check_run_32_ServiceLineAdjustments] 
+                    --WHERE claim_ud = CONCAT(@ccx_overpayment_claim_ud, 'R0')
+                    --ORDER BY cServiceLineSequence DESC
+
+
+                    -- Only Add 1 adjustment per service line with full charge amount as Patient Responsibility
+                    INSERT INTO @Overpayment_ServiceLineAdjustments
+                    (
+                        [cRecordType],
+                        [cRecordVersion],
+                        [cAdjustmentGroupCode],
+                        [cAdjustmentReasonCode],
+                        [cAdjustmentAmount],
+                        [cLineNumber],
+                        [cLineItemControlNumber],
+                        [cOriginalProcedureCode]
+                    )
+                    SELECT '32',
+                           '07',
+                           @ccxAdjustmentGroupCode,
+                           @ccxAdjustmentReasonCode,
+                           [cTotalCharge],
+                           [cLineNumber],
+                           (
+                               SELECT TOP 1
+                                      [cLineItemControlNumber]
+                               FROM [dbo].[check_run_32_ServiceLineAdjustments] [a]
+                               WHERE [a].[claim_id] = @ccx_original_claim_id
+                                     AND [a].[cLineNumber] = [sl].[cLineNumber]
+                           ),
+                           [cProcedureCode]
+                    FROM @Overpayment_ServiceLine [sl];
+
+
+                END;
+
+
+                SET @ctotal_count =
+                (
+                    SELECT COUNT(*)FROM @Overpayment_ServiceLineAdjustments
+                );
+                SET @cRecId = 1;
+                SET @servicelinenumber = 0;
+
+                WHILE @cRecId <= @ctotal_count
+                BEGIN
+
+                    SET @servicelinenumber = @servicelinenumber + 1;
+
+                    SET @servicelinesequence_char = RIGHT(CONCAT('000000', @servicelinenumber), 6);
+                    SET @servicelinenumber_char = RIGHT(CONCAT('000', @servicelinenumber), 3)
+
+
+                    -- Reverse Service Line Adjustments 
+                    ;
+                    WITH [Overpayment_ServiceLineAdjustments]
+                    AS (SELECT *,
+                               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [rn]
+                        FROM @Overpayment_ServiceLineAdjustments)
+                    UPDATE [Overpayment_ServiceLineAdjustments]
+                    SET [cDocId] = @doc_id,
+                        [cClaimSequence] = @claim_sequence_char,
+                        [cClaimNumber] = @claim_number,
+                        [cServiceLineSequence] = @servicelinesequence_char,
+                        --cLineNumber = CASE WHEN @ccx_IsReversal = 1 THEN cLineNumber ELSE @servicelinenumber_char END,
+                        [cClaimRelationString] = @claim_number,
+                        [cAdjustmentAmount] = CASE
+                                                  WHEN @ccx_IsReversal = 1 THEN
+                                                      LTRIM(CAST(CONVERT(MONEY, [cAdjustmentAmount]) * -1 AS VARCHAR))
+                                                  ELSE
+                                                      [cAdjustmentAmount]
+                                              END
+                    WHERE [rn] = @cRecId;
+                    WITH [Overpayment_ServiceLineAdjustments2]
+                    AS (SELECT *,
+                               ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS [rn]
+                        FROM @Overpayment_ServiceLineAdjustments)
+                    SELECT @record
+                        =
+                        (
+                            SELECT [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cClaimSequence]
+                                   + @tab + [cClaimNumber] + @tab + [cServiceLineSequence] + @tab + [cLineNumber]
+                                   + @tab + [cClaimRelationString] + @tab + [cLabel] + @tab + [cServiceQualifier]
+                                   + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentGroupCode] + @tab
+                                   + [cAdjustmentReasonCode] + @tab + [cSvcRARC] + @tab + [cLineItemControlNumber]
+                                   + @tab + [cOriginalProcedureCode] + @tab + [cAlternateProcedureCode] + @tab
+                                   + [cOpenField1] + @tab + [cOpenField2] + @tab + [cOpenField3] + @tab
+                                   + [cOriginalChargeAmount] + @tab + [cOriginalLineNumber] + @tab + [cOriginalUnits]
+                                   + @tab + [cClientSystemRemarkCode] + @tab + [cAdjustmentReasonType] + @tab
+                                   + [cQuantity] + @tab + [cSvcRARC2] + @tab + [cSvcRARC3] + @tab + [cSvcRARC4] + @tab
+                                   + [cSvcRARC5] + @tab + [cSvcRARC6] + @tab + [cSvcRARC7] + @tab + [cSvcRARC8] + @tab
+                                   + [cSvcRARC9] + @tab + [cSvcRARC10]
+                            FROM [Overpayment_ServiceLineAdjustments2]
+                            WHERE [rn] = @cRecId
+                        );
+
+
+                    IF @record IS NOT NULL
+                    BEGIN
+                        EXEC @return_status = [check_run_record_insert_redcard] @check_run_id,
+                                                                                @line_number OUTPUT,
+                                                                                @record,
+                                                                                1,
+                                                                                @user_id;
+                    END;
+                    --IF @return_status <> 0  
+                    --BEGIN  
+                    --     RAISERROR('Fatal Error 3', 16, 1)   
+                    --END
+
+
+                    -- Go to next Service Line Adjustment
+                    SET @cRecId = @cRecId + 1;
+                END;
+
+                -- Save ALL SERVICE LINES data fields and check run parameters 
+                EXEC [dbo].[check_run_32_ServiceLineAdjustments_log_redcard] @check_run_id,
+                                                                             @voucher_id,
+                                                                             @ccx_overpayment_claim_id,
+                                                                             @claim_number,
+                                                                             @doc_type,
+                                                                             @doc_id,
+                                                                             NULL,
+                                                                             @Overpayment_ServiceLineAdjustments;
+
+
+
+                --=============================================================================================================
+                -- ======  STEP 4: Add PLB Segment to Offset claim reversal and collect overpayment at a later time
+                --=============================================================================================================
+                IF @ccx_IsReversal = 1
+                BEGIN
+
+                    DELETE FROM @documentAdjustmentTable;
+
+                    SET @cProviderId = '1417097593'; -- CCX NPI Number
+                    SET @cAdjustmentReasonCode = 'CS';
+                    SET @cAdjustmentDescription = 'Claim Adjustment';
+                    SET @cAdjustmentId = LEFT(@ccx_patient_number, 50);
+
+                    INSERT INTO @documentAdjustmentTable
+                    (
+                        [cRecordType],
+                        [cRecordVersion],
+                        [cDocId],
+                        [cProviderId],
+                        [cAdjustmentReasonCode],
+                        [cAdjustmentDescription],
+                        [cAdjustmentId],
+                        [cAdjustmentAmount],
+                        [cAdjustmentClaimNumber],
+                        [cFiscalPeriodDate]
+                    )
+                    VALUES
+                    (@cRecordType, @cRecordVersion, @doc_id, @cProviderId, @cAdjustmentReasonCode,
+                     @cAdjustmentDescription, @cAdjustmentId, - (@cTotalPayment), @claim_number, @cFiscalPeriodDate);
+
+
+                    -- ===== Save documentAdjustmentTable row and check run parameters =====
+                    EXEC [dbo].[check_run_45_documentadj_log_redcard] @check_run_id,
+                                                                      @voucher_id,
+                                                                      @doc_type,
+                                                                      @doc_id,
+                                                                      @claim_id,
+                                                                      @claim_ud,
+                                                                      @documentAdjustmentTable;
+
+
+                    -- ======== INSERT DocumentAdjustment Records in payment file  ========
+                    SET @docAdjRecord =
+                    (
+                        SELECT TOP 1
+                               [cRecordType] + @tab + [cRecordVersion] + @tab + [cDocId] + @tab + [cProviderId] + @tab
+                               + [cFiscalPeriodDate] + @tab + [cAdjustmentReasonCode] + @tab + [cAdjustmentDescription]
+                               + @tab + [cAdjustmentId] + @tab + [cAdjustmentAmount] + @tab + [cAdjustmentPatientName]
+                               + @tab + [cAdjustmentPatientFirstName] + @tab + [cAdjustmentPatientMiddleName] + @tab
+                               + [cAdjustmentPatientLastName] + @tab + [cAdjustmentPatientAccountNumber] + @tab
+                               + [cAdjustmentGroupCode] + @tab + [cAdjustmentSubNumber] + @tab + [cAdjustmentClaimNumber]
+                               + @tab + [cAdjustmentFromServiceDate] + @tab + [cAdjustmentToServiceDate]
+                        FROM @documentAdjustmentTable
+                    );
+
+                    -- Save record to check run batch
+                    EXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id,
+                                                                                  @line_number OUTPUT,
+                                                                                  @docAdjRecord,
+                                                                                  1,
+                                                                                  @user_id;
+
+
+                END; -- @ccx_IsReversal = 1
+                     --ELSE 
+                     --BEGIN
+
+                --    -- For Denials, add single Claim Level Adjustment with the full charge amount as Patient Responsibility
+                --\tDELETE FROM @Overpayment_ClaimAdjustment
+
+                --\tINSERT INTO @Overpayment_ClaimAdjustment
+                --\t(cRecordType, cRecordVersion, cDocId, cLabel, cAmount, cAdjustmentType, cClaimRelationString, cOpenField1, cOpenField2, cOpenField3, cCARC, cRARC, cCARCGroupCode, cOpenField4, cOpenField5, cClaimNumber, cQuantity)
+                --    VALUES
+                --\t('19', '09', @doc_id, 'Claim Adjustment', @cTotalCharge, '', @claim_number, '', '', '',  '27', '', 'PR', '', '', @claim_number, '')
+
+                --\t-- ===== Save ClaimAdjustment row and check run parameters =====
+                --\tEXEC [dbo].[check_run_log_19_claimadjustment_redcard] @check_run_id, @voucher_id, @ccx_overpayment_claim_id, @doc_type, @Overpayment_ClaimAdjustment
+
+
+                --\t-- ======== INSERT ClaimAdjustment Records in payment file  ========
+                --    SET @record = (
+                --\t\tSELECT TOP 1 
+                --\t\t\t cRecordType           + @tab +
+                --\t\t\t cRecordVersion\t\t   + @tab +
+                --\t\t\t cDocId\t\t\t\t   + @tab +
+                --\t\t\t cLabel                + @tab +
+                --\t\t\t cAmount\t\t\t   + @tab +
+                --\t\t\t cAdjustmentType\t   + @tab +
+                --\t\t\t cClaimRelationString  + @tab +
+                --\t\t\t cOpenField1\t\t   + @tab +
+                --\t\t\t cOpenField2\t\t   + @tab +
+                --\t\t\t cOpenField3\t\t   + @tab +
+                --\t\t\t cCARC\t\t\t\t   + @tab +
+                --\t\t\t cRARC\t\t\t\t   + @tab +
+                --\t\t\t cCARCGroupCode\t\t   + @tab +
+                --\t\t\t cOpenField4\t\t   + @tab +
+                --\t\t\t cOpenField5\t\t   + @tab +
+                --\t\t\t cClaimNumber\t\t   + @tab +
+                --\t\t\t cQuantity
+                --\t    FROM @Overpayment_ClaimAdjustment)
+
+                --\t-- Save record to check run batch
+                --\tEXEC @return_status = [dbo].[check_run_record_insert_redcard] @check_run_id, @line_number OUTPUT, @record, 1, @user_id;
+
+
+                --END
+
+                -- Process next Claim
+                SET @recId = @recId + 1;
+
+            END; -- WHILE @recId <= @total_count
+
+        END; -- @vendor_tax_id = 'CCX'
+
+
+    END TRY
+    BEGIN CATCH
+
+        PRINT 'ERROR';
+        PRINT ERROR_MESSAGE();
+
+    END CATCH;
+
+END;
