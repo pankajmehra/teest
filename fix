@@ -1,3 +1,46 @@
+
+-- Replace with the claim IDs Tania/Peter provide
+DECLARE @ClaimIds TABLE (claim_id INT);
+
+INSERT INTO @ClaimIds (claim_id)
+VALUES
+    (123456789),
+    (123456790);
+
+
+-- Review before update
+SELECT
+    co.claim_overpayment_id,
+    co.claim_id,
+    co.created_date,
+    DATEADD(DAY, -46, GETDATE()) AS new_created_date,
+    co.claim_overpayment_status_id,
+    co.ok_to_net_indicator
+FROM dbo.claim_overpayment co
+INNER JOIN @ClaimIds c
+    ON c.claim_id = co.claim_id;
+
+
+-- Update created_date so the claims are older than the 45-day waiting period
+UPDATE co
+SET co.created_date = DATEADD(DAY, -46, GETDATE())
+FROM dbo.claim_overpayment co
+INNER JOIN @ClaimIds c
+    ON c.claim_id = co.claim_id;
+
+
+-- Verify
+SELECT
+    co.claim_overpayment_id,
+    co.claim_id,
+    co.created_date,
+    DATEDIFF(DAY, co.created_date, GETDATE()) AS days_old,
+    co.claim_overpayment_status_id,
+    co.ok_to_net_indicator
+FROM dbo.claim_overpayment co
+INNER JOIN @ClaimIds c
+    ON c.claim_id = co.claim_id;
+
 Subject: Story 45385 – Final Proposed Changes for Repriced Claim Reply Import Error Handling
 
 Goal
