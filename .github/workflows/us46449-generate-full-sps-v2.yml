@@ -1,0 +1,179 @@
+name: US46449 Generate Full SPs V2
+
+on:
+  push:
+    branches:
+      - story-46449-npi-qa-fix
+    paths:
+      - .github/workflows/us46449-generate-full-sps-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Generate exact full SP files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import subprocess
+
+          def git_show(path):
+              return subprocess.check_output(["git", "show", "origin/main:" + path], text=True, encoding="utf-8")
+
+          def one(text, old, new, label):
+              n = text.count(old)
+              if n != 1:
+                  raise RuntimeError(f"{label}: expected 1 match, got {n}")
+              return text.replace(old, new, 1)
+
+          def blob_sha(text):
+              data = text.encode("utf-8")
+              return hashlib.sha1(("blob %d\0" % len(data)).encode() + data).hexdigest()
+
+          # Exact master baseline previously reviewed for 46449.
+          master = git_show("check_run_master_redcard_46449_UPDATED.sql")
+
+          hist = " Modified 08/18/2026 PS  47283 Allow claim reversals on EOPs for all groups\n"
+          master = one(master, hist, hist + " Modified 09/13/2026 PM  46449 QA fix - use the same Payee NPI source as Record 06 for Master and Claim Non-Detail\n", "master history")
+
+          var = " DECLARE @payee_npi                 varchar(10) -- 46449\n"
+          master = one(master, var, var + " DECLARE @payee_npi_claim_id        int         -- 46449 QA fix: claim id that Record 06 will receive\n", "master variable")
+
+          anchor = " set @first_time = 1  \n\n -----------------------------------------------  \n -- Determine @NSA_flag  \n -----------------------------------------------  \n"
+          stable = """ set @first_time = 1  
+
+ -- 46449 QA fix
+ -- Record 06 is created after the claim loop and receives the final @claim_id processed.
+ -- Resolve that same claim up front so Record 00 and every Record 01 use the exact
+ -- same Payee/Billing NPI that Record 06 will report.
+ SET @payee_npi = ''
+ SET @payee_npi_claim_id = NULL
+
+ IF @doc_type IN ('EOB', 'EOP')
+ BEGIN
+     SELECT TOP 1
+         @payee_npi_claim_id = claim_id
+     FROM #claiminfo
+     WHERE claim_id IS NOT NULL
+     ORDER BY claiminfo_id DESC
+
+     SELECT TOP 1
+         @payee_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
+     FROM dbo.claim c
+     INNER JOIN dbo.provider_id_map pim
+         ON c.provider_id_map_id = pim.provider_id_map_id
+     INNER JOIN dbo.vendor v
+         ON c.vendor_id = v.vendor_id
+     WHERE c.claim_id = @payee_npi_claim_id
+       AND LEN(v.tax_id) > 0
+       AND LEN(c.billing_provider_npi) > 0
+       AND @vendor_id <> 1337149
+ END
+
+ -----------------------------------------------  
+ -- Determine @NSA_flag  
+ -----------------------------------------------  
+"""
+          master = one(master, anchor, stable, "master stable NPI")
+
+          old_lookup = """       -- 46449 Populate cPayeeNPI using the same rules as Record 06 cPayeeNPI
+   SET @payee_npi = ''
+   IF @doc_type IN ('EOB', 'EOP')
+   BEGIN
+       SELECT TOP 1
+           @payee_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
+       FROM dbo.claim c
+       INNER JOIN dbo.provider_id_map pim
+           ON c.provider_id_map_id = pim.provider_id_map_id
+       INNER JOIN dbo.vendor v
+           ON c.vendor_id = v.vendor_id
+       WHERE c.claim_id = @claim_id
+         AND LEN(v.tax_id) > 0
+         AND LEN(c.billing_provider_npi) > 0
+         AND @vendor_id <> 1337149
+   END
+
+"""
+          master = one(master, old_lookup, "", "old master lookup")
+
+          old_tail = "  @manual_ap_entry_id ,  \n  @redirect_code -- redirect code signifying which address to send the redirect to  \n"
+          new_tail = "  @manual_ap_entry_id ,  \n  @redirect_code, -- redirect code signifying which address to send the redirect to  \n  @payee_npi      -- 46449 QA fix: same NPI that Record 06 will report\n"
+          master = one(master, old_tail, new_tail, "master call parameter")
+
+          # Exact claim non-detail baseline previously reviewed for 46449.
+          claim = git_show("check_run_claimnondetail_redcard_46449 (1).sql")
+
+          chist = " modified 08/04/2026 46449 PM Populate Billing NPI and Rendering Physician NPI in Record 01\n"
+          claim = one(claim, chist, chist + " modified 09/13/2026 46449 PM QA fix - cBillingNPI must use the same Payee NPI as Record 06\n", "claim history")
+
+          old_sig = " @manual_ap_entry_id int ,  \n @redirect_code char(3)   -- code for redirect address to use  \n"
+          new_sig = " @manual_ap_entry_id int ,  \n @redirect_code char(3),  -- code for redirect address to use  \n @payee_npi varchar(10) = NULL -- 46449 QA fix: Record 06 Payee NPI supplied by master\n"
+          claim = one(claim, old_sig, new_sig, "claim signature")
+
+          old_billing = """   -- 46449 Populate cBillingNPI using the same rules as Record 06 cPayeeNPI
+   SET @billing_npi = ''
+   SELECT TOP 1
+       @billing_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
+   FROM dbo.claim c
+   INNER JOIN dbo.provider_id_map pim ON c.provider_id_map_id = pim.provider_id_map_id
+   INNER JOIN dbo.vendor v ON c.vendor_id = v.vendor_id
+   WHERE c.claim_id = @claim_id
+     AND LEN(v.tax_id) > 0
+     AND LEN(c.billing_provider_npi) > 0
+     AND @voucher_vendor_id <> 1337149
+"""
+          new_billing = """   -- 46449 QA fix: cBillingNPI must be the same NPI reported on Record 06.
+   -- The master SP passes that stable voucher/check-level NPI for every 01 record.
+   SET @billing_npi = ISNULL(@payee_npi, '')
+
+   -- Backward-compatible fallback for any legacy caller that does not pass @payee_npi.
+   IF @payee_npi IS NULL
+   BEGIN
+       SELECT TOP 1
+           @billing_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
+       FROM dbo.claim c
+       INNER JOIN dbo.provider_id_map pim ON c.provider_id_map_id = pim.provider_id_map_id
+       INNER JOIN dbo.vendor v ON c.vendor_id = v.vendor_id
+       WHERE c.claim_id = @claim_id
+         AND LEN(v.tax_id) > 0
+         AND LEN(c.billing_provider_npi) > 0
+         AND @voucher_vendor_id <> 1337149
+   END
+"""
+          claim = one(claim, old_billing, new_billing, "claim billing NPI")
+
+          expected_master = "6d1a8a4dd5b259d1d235990e1fee66951c83d148"
+          expected_claim = "a7c50fc013547320383d00c3e54bb453a7e8580a"
+          msha = blob_sha(master)
+          csha = blob_sha(claim)
+          if msha != expected_master:
+              raise RuntimeError(f"master SHA mismatch: {msha} != {expected_master}")
+          if csha != expected_claim:
+              raise RuntimeError(f"claim SHA mismatch: {csha} != {expected_claim}")
+
+          Path("check_run_master_redcard_46449_QA_FIX.sql").write_text(master, encoding="utf-8", newline="")
+          Path("check_run_claimnondetail_redcard_46449_QA_FIX.sql").write_text(claim, encoding="utf-8", newline="")
+          print("Master:", msha)
+          print("Claim:", csha)
+          PY
+
+      - name: Commit full SPs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add check_run_master_redcard_46449_QA_FIX.sql check_run_claimnondetail_redcard_46449_QA_FIX.sql
+          git rm -f .github/workflows/us46449-generate-full-sps.yml .github/workflows/us46449-generate-full-sps-v2.yml
+          git commit -m "US 46449: add full QA-fixed stored procedures"
+          git push origin HEAD:story-46449-npi-qa-fix
