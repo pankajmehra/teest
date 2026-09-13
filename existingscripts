@@ -1,0 +1,227 @@
+USE [Edee]
+GO
+
+/****** Object:  Table [dbo].[anthem_recon_detail]    Script Date: 9/13/2026 12:07:25 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[anthem_recon_detail](
+	[anthem_recon_detail_id] [int] IDENTITY(1,1) NOT NULL,
+	[dcn] [varchar](38) NOT NULL,
+	[member_id] [varchar](50) NULL,
+	[claim_type] [varchar](2) NOT NULL,
+	[claim_id] [int] NULL,
+	[recon_tracking_status_id] [int] NULL,
+	[pat_last_name] [varchar](35) NOT NULL,
+	[pat_first_name] [varchar](35) NULL,
+	[pat_dob] [datetime] NULL,
+	[case_number] [varchar](30) NULL,
+	[group_number] [varchar](30) NULL,
+	[its_ind] [char](1) NULL,
+	[action_reason_code] [varchar](6) NULL,
+	[allowed_amount] [money] NULL,
+	[tot_approved_to_pay] [money] NULL,
+	[copay_amount] [money] NULL,
+	[deductible_amount] [money] NULL,
+	[coins_amount] [money] NULL,
+	[tot_charge_amount] [money] NULL,
+	[item_code] [varchar](3) NULL,
+	[prior_payment_amount] [money] NULL,
+	[deb_cred_amount] [money] NULL,
+	[ineligible_amount] [money] NULL,
+	[surcharge_ind] [char](1) NULL,
+	[tot_surcharge_amount] [money] NULL,
+	[surcharge_member_amount] [money] NULL,
+	[surcharge_anthem_amount] [money] NULL,
+	[supplemental_amount] [money] NULL,
+	[payee_code] [varchar](3) NULL,
+	[adj_reason_code] [varchar](3) NULL,
+	[tpa_837_ind] [char](1) NULL,
+	[fund_initiated_adj_ind] [char](1) NULL,
+	[last_processed_date] [datetime] NULL,
+	[tpa_835_ind] [char](1) NULL,
+	[processed_835_date] [datetime] NULL,
+	[accelerated_pay_ind] [char](1) NULL,
+	[seq_number] [varchar](3) NULL,
+	[filename] [varchar](256) NULL,
+	[created_date] [datetime] NOT NULL,
+	[created_user_id] [int] NOT NULL,
+	[modified_date] [datetime] NOT NULL,
+	[modified_user_id] [int] NOT NULL,
+	[deleted] [bit] NOT NULL,
+ CONSTRAINT [PK_anthem_recon_detail] PRIMARY KEY CLUSTERED 
+(
+	[anthem_recon_detail_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, FILLFACTOR = 90, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_detail] ADD  CONSTRAINT [DF_anthem_recon_detail_created_date]  DEFAULT (getdate()) FOR [created_date]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_detail] ADD  CONSTRAINT [DF_anthem_recon_detail_created_user_id]  DEFAULT (suser_id()) FOR [created_user_id]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_detail] ADD  CONSTRAINT [DF_anthem_recon_detail_modified_date]  DEFAULT (getdate()) FOR [modified_date]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_detail] ADD  CONSTRAINT [DF_anthem_recon_detail_modified_user_id]  DEFAULT (suser_id()) FOR [modified_user_id]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_detail] ADD  CONSTRAINT [DF_anthem_recon_detail_deleted]  DEFAULT ((0)) FOR [deleted]
+GO
+
+
+USE [Edee]
+GO
+
+/****** Object:  Table [dbo].[anthem_recon_file]    Script Date: 9/13/2026 12:08:10 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[anthem_recon_file](
+	[anthem_recon_file_Id] [int] IDENTITY(1,1) NOT NULL,
+	[file_name] [varchar](250) NULL,
+	[file_type] [varchar](250) NULL,
+	[load_rows] [int] NULL,
+	[processed] [bit] NULL,
+	[imported_count] [int] NULL,
+	[created_date] [datetime] NULL,
+	[created_user_id] [int] NULL,
+	[created_user] [varchar](100) NULL,
+	[modified_date] [datetime] NULL,
+	[modified_user_id] [varchar](100) NULL,
+	[deleted] [bit] NULL,
+	[rework] [bit] NULL,
+ CONSTRAINT [PK_anthem_recon_file] PRIMARY KEY CLUSTERED 
+(
+	[anthem_recon_file_Id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF, DATA_COMPRESSION = PAGE) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file] ADD  CONSTRAINT [DF_anthem_recon_file_created_date]  DEFAULT (getdate()) FOR [created_date]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file] ADD  CONSTRAINT [DF_anthem_recon_file_modified_date]  DEFAULT (getdate()) FOR [modified_date]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file] ADD  CONSTRAINT [DF_anthem_recon_file_deleted]  DEFAULT ((0)) FOR [deleted]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file] ADD  CONSTRAINT [DF_anthem_recon_file_rework]  DEFAULT ((0)) FOR [rework]
+GO
+
+
+USE [Edee]
+GO
+
+/****** Object:  Table [dbo].[anthem_recon_file_stage]    Script Date: 9/13/2026 12:08:26 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[anthem_recon_file_stage](
+	[anthem_recon_file_stage_Id] [int] IDENTITY(1,1) NOT NULL,
+	[DCN] [varchar](100) NULL,
+	[MEMB_ID] [varchar](100) NULL,
+	[CLM_TYP] [varchar](100) NULL,
+	[PAT_LAST_NME] [varchar](35) NULL,
+	[PAT_FRST_NME] [varchar](35) NULL,
+	[PAT_DOB] [varchar](100) NULL,
+	[CLT_CASE] [varchar](100) NULL,
+	[CLT_GROUP] [varchar](100) NULL,
+	[ITS_IND] [varchar](100) NULL,
+	[PAY_ACT_CDE] [varchar](100) NULL,
+	[CLM_ALW_AMT] [varchar](100) NULL,
+	[TOT_APPR_PAY] [varchar](100) NULL,
+	[COPAY_AMT] [varchar](100) NULL,
+	[DEDUCT_AMT] [varchar](100) NULL,
+	[COINS_AMT] [varchar](100) NULL,
+	[TOT_CHG_AMT] [varchar](100) NULL,
+	[ITEM_CD] [varchar](100) NULL,
+	[PRIOR_PAY] [varchar](100) NULL,
+	[DEBIT_CREDIT] [varchar](100) NULL,
+	[INELIG_AMT] [varchar](100) NULL,
+	[SURG_CLM_IND] [varchar](100) NULL,
+	[SRG_TOT_AMT] [varchar](100) NULL,
+	[SRG_MEM_AMT] [varchar](100) NULL,
+	[SRG_ATH_AMT] [varchar](100) NULL,
+	[SUPP_DOL_AMT] [varchar](100) NULL,
+	[PAYEE_CDE] [varchar](100) NULL,
+	[ADJ_RSN_CDE] [varchar](100) NULL,
+	[TPA_837_IND] [varchar](10) NULL,
+	[FUND_INIT_IND] [varchar](100) NULL,
+	[LST_PROC_DT] [varchar](100) NULL,
+	[TPA_835_IND] [varchar](100) NULL,
+	[DATE_835] [varchar](100) NULL,
+	[ACC_PAY] [varchar](100) NULL,
+	[CLM_SEQ] [varchar](100) NULL,
+	[anthem_recon_file_id] [int] NOT NULL,
+	[file_name] [varchar](256) NULL,
+	[created_date] [datetime] NULL,
+	[created_user] [varchar](256) NULL,
+	[deleted] [bit] NULL,
+ CONSTRAINT [PK_anthem_recon_file_stage] PRIMARY KEY CLUSTERED 
+(
+	[anthem_recon_file_stage_Id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF, DATA_COMPRESSION = PAGE) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file_stage] ADD  CONSTRAINT [DF_anthem_recon_file_stage_created_date]  DEFAULT (getdate()) FOR [created_date]
+GO
+
+ALTER TABLE [dbo].[anthem_recon_file_stage] ADD  CONSTRAINT [DF_anthem_recon_file_stage_deleted]  DEFAULT ((0)) FOR [deleted]
+GO
+
+
+Description: 
+
+ 
+
+As claims, I want to create tables and procs to import the weekly recon file received from BCBSM, so that we can have the data parsed and available from these files so that we can match back to a claim and run reconciliation comparisons. 
+
+ 
+
+Objectives:
+
+ 
+
+We need to deliver the following:
+
+Create the tables to load data
+BCBSM_Recon_File
+Table will show file load status similar to anthem_recon_file 
+BCBSM_Recon_Stage
+Table will stage the data from the recon file to load into the detail table
+BCBSM_Recon_Detail 
+Table will show the loaded recon data from the recon file imported
+Create 2 procs to import the files 
+proc to clear stage table (clear prev file data prior to import of new)
+proc to import file to stage
+proc to import to detail table 
+Recon File is received WEEKLY
+ 
+
+Additional Information:
+
+Import proc/process will be set up similarly to what exists for the anthem recon process
+
+
+
+recon layout:
+
+BCBSM Recon File Layout.xlsx
+
+
+
+
