@@ -1,0 +1,35 @@
+--- check_run_master_redcard_46449_QA_FIX.sql
++++ check_run_master_redcard_46449_QA_FIX.sql
+@@ -158,7 +158,7 @@
+  DECLARE @vendor_zip                varchar(5)  
+  DECLARE @vendor_phone              varchar(13)  
+  DECLARE @payee_npi                 varchar(10) -- 46449
+- DECLARE @payee_npi_claim_id        int         -- 46449 QA fix: claim id that Record 06 will receive
++ DECLARE @check_claim_id            int         -- 46449 QA fix: claim id that Record 06 will receive
+   
+  -- Check Information  
+  DECLARE @check_number              bigint  
+@@ -1382,12 +1382,12 @@
+  -- Resolve that same claim up front so Record 00 and every Record 01 use the exact
+  -- same Payee/Billing NPI that Record 06 will report.
+  SET @payee_npi = ''
+- SET @payee_npi_claim_id = NULL
++ SET @check_claim_id = NULL
+ 
+  IF @doc_type IN ('EOB', 'EOP')
+  BEGIN
+      SELECT TOP 1
+-         @payee_npi_claim_id = claim_id
++         @check_claim_id = claim_id
+      FROM #claiminfo
+      WHERE claim_id IS NOT NULL
+      ORDER BY claiminfo_id DESC
+@@ -1399,7 +1399,7 @@
+          ON c.provider_id_map_id = pim.provider_id_map_id
+      INNER JOIN dbo.vendor v
+          ON c.vendor_id = v.vendor_id
+-     WHERE c.claim_id = @payee_npi_claim_id
++     WHERE c.claim_id = @check_claim_id
+        AND LEN(v.tax_id) > 0
+        AND LEN(c.billing_provider_npi) > 0
+        AND @vendor_id <> 1337149
