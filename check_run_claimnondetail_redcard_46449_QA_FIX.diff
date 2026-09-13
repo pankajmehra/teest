@@ -1,0 +1,55 @@
+--- check_run_claimnondetail_redcard_46449.sql
++++ check_run_claimnondetail_redcard_46449_QA_FIX.sql
+@@ -28,7 +28,8 @@
+  @cor_name varchar(50),   -- name of correspondence pred , pday15  
+  @primary_correspondence_link_type_id int ,  
+  @manual_ap_entry_id int ,  
+- @redirect_code char(3)   -- code for redirect address to use  
++ @redirect_code char(3),  -- code for redirect address to use  
++ @payee_npi varchar(10) = NULL -- 46449 QA fix: Record 06 Payee NPI supplied by master
+   
+   
+ WITH EXECUTE AS CALLER  
+@@ -100,6 +101,7 @@
+  Modified 03/13/2026 45379 ZELIS 835 | QPA IDR Language | Medica Specific requirement
+  Modified 06/23/2026 46523 AJ Adding Patient relationship in Record 01
+  modified 08/04/2026 46449 PM Populate Billing NPI and Rendering Physician NPI in Record 01
++ modified 09/13/2026 46449 PM QA fix - cBillingNPI must use the same Payee NPI as Record 06
+ --------------------------------------------------------------------------------------------------------------**/  
+     -- Local Variables  
+     ----------------------------------------  
+@@ -742,17 +744,23 @@
+    WHERE claim.claim_id = @claim_id  
+    --and provider_id_map.provider_id_map_category_id in(11,12)
+ 
+-   -- 46449 Populate cBillingNPI using the same rules as Record 06 cPayeeNPI
+-   SET @billing_npi = ''
+-   SELECT TOP 1
+-       @billing_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
+-   FROM dbo.claim c
+-   INNER JOIN dbo.provider_id_map pim ON c.provider_id_map_id = pim.provider_id_map_id
+-   INNER JOIN dbo.vendor v ON c.vendor_id = v.vendor_id
+-   WHERE c.claim_id = @claim_id
+-     AND LEN(v.tax_id) > 0
+-     AND LEN(c.billing_provider_npi) > 0
+-     AND @voucher_vendor_id <> 1337149
++   -- 46449 QA fix: cBillingNPI must be the same NPI reported on Record 06.
++   -- The master SP passes that stable voucher/check-level NPI for every 01 record.
++   SET @billing_npi = ISNULL(@payee_npi, '')
++
++   -- Backward-compatible fallback for any legacy caller that does not pass @payee_npi.
++   IF @payee_npi IS NULL
++   BEGIN
++       SELECT TOP 1
++           @billing_npi = SUBSTRING(ISNULL(c.billing_provider_npi, ''), 1, 10)
++       FROM dbo.claim c
++       INNER JOIN dbo.provider_id_map pim ON c.provider_id_map_id = pim.provider_id_map_id
++       INNER JOIN dbo.vendor v ON c.vendor_id = v.vendor_id
++       WHERE c.claim_id = @claim_id
++         AND LEN(v.tax_id) > 0
++         AND LEN(c.billing_provider_npi) > 0
++         AND @voucher_vendor_id <> 1337149
++   END
+ 
+    	-----------------------------------------------  
+     -- Check if claim is nsa and claim file source for not anthem to set QPA IDR language
