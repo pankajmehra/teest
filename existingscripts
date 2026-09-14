@@ -223,5 +223,325 @@ recon layout:
 BCBSM Recon File Layout.xlsx
 
 
+USE [Edee]
+GO
+/****** Object:  StoredProcedure [dbo].[anthem_recon_file_Insert]    Script Date: 9/13/2026 10:19:31 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/*************************************************************************  
+Name:   [dbo].[anthem_recon_file_Insert]  
+Description: Inserts File    
+Used by:    
+Test harness: EXEC [dbo].[anthem_recon_file_Insert] (...)  
+Execution time:   
+Created:  08/18/2025 Durgesh Alapati 
 
+**************************************************************************/  
+  
+ALTER      PROCEDURE [dbo].[anthem_recon_file_Insert]  
+ @anthem_recon_file_id int OUTPUT,  
+ @file_name varchar(250),  
+ @file_type varchar(250),  
+ @load_rows int,  
+ @created_user varchar(250)   
+
+AS  
+  
+BEGIN  
+ SET NOCOUNT ON  
+ 
+ DECLARE @sp_name	VARCHAR(50) = OBJECT_NAME(@@PROCID)
+ DECLARE @ServerName VARCHAR(100) = (SELECT @@SERVERNAME)
+ DECLARE @NotificationType VARCHAR(100)    
+ DECLARE @ProgramName VARCHAR(100) 
+ DECLARE @Email_Subject VARCHAR(300) = ''  
+ DECLARE	@error_message		VARCHAR(MAX),  
+			@dt					DATETIME		= GETDATE() ,
+			@sec_user_id		INT,     
+			@sec_user_name		VARCHAR(50),    
+			@start				INT,    
+			@login_name			VARCHAR(50)    
+
+	SELECT @sec_user_name = suser_sname()   
+	SELECT @start = charindex('\',@sec_user_name) 
+	SELECT @login_name = substring(@sec_user_name,@start+1,len(@sec_user_name)-@start)     
+	SELECT @sec_user_id = 0   
+	SELECT @sec_user_id = sec_user_id FROM mcr_dc_prod.dbo.sec_user WHERE login_name = @login_name     
+  
+ BEGIN TRY  
+    BEGIN  
+      
+    INSERT INTO Edee.[dbo].[anthem_recon_file]  
+     (file_name, file_type,load_rows,created_user,created_user_id,modified_user_id)   
+    VALUES  
+     (@file_name,@file_type,@load_rows,@created_user,@sec_user_id,@sec_user_id)  
+      	     
+    SET @anthem_recon_file_id = SCOPE_IDENTITY()  
+
+   END  
+     
+ END TRY  
+ BEGIN CATCH  
+    
+ 		SET @Email_Subject = @NotificationType + ' - ' + @ProgramName + ' - ' + @ServerName 
+		SET @ProgramName = 'Finance Support'
+		SET @error_message = 'A database error occurred:'
+			+ CHAR(13) + CHAR(10)
+			+ 'Procedure Name: ' + @sp_name
+			+ CHAR(13) + CHAR(10)
+			+ 'Error Description: ' + ERROR_MESSAGE()
+			+ CHAR(13) + CHAR(10)
+			+ 'User: ' + @login_name
+		EXEC mcr_dc_prod.[dbo].[finance_email_notification] @sec_user_id, @error_message, @ProgramName, @sp_name
+  
+  ;THROW  
+ END CATCH  
+  
+ RETURN 0  
+  
+END  
+
+Then we do blkcopy to anthem_recon_file_stage
+
+Then we call anthem_recon_file_update
+
+USE [Edee]
+GO
+/****** Object:  StoredProcedure [dbo].[anthem_recon_file_update]    Script Date: 9/13/2026 10:24:45 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/*************************************************************************  
+Name:   [dbo].[anthem_recon_file_update]  
+Description: Updates File    
+Used by:    
+Test harness: EXEC [dbo].[anthem_recon_file_update] (...)  
+Execution time:   
+Created:  08/22/2025 Durgesh Alapati 
+
+**************************************************************************/  
+  
+ALTER      PROCEDURE [dbo].[anthem_recon_file_update]  
+ @reconFile_id INT, 
+ @load_rows INT,   
+ @imported_count INT
+
+AS  
+  
+BEGIN  
+ SET NOCOUNT ON  
+ 
+ DECLARE @sp_name	VARCHAR(50) = OBJECT_NAME(@@PROCID)
+ DECLARE @ServerName VARCHAR(100) = (SELECT @@SERVERNAME)
+ DECLARE @NotificationType VARCHAR(100)    
+ DECLARE @ProgramName VARCHAR(100) 
+ DECLARE @Email_Subject VARCHAR(300) = ''  
+ DECLARE	@error_message		VARCHAR(MAX),  
+			@dt					DATETIME		= GETDATE() ,
+			@sec_user_id		INT,     
+			@sec_user_name		VARCHAR(50),    
+			@start				INT,    
+			@login_name			VARCHAR(50)
+
+	SELECT @sec_user_name = suser_sname()   
+	SELECT @start = charindex('\',@sec_user_name) 
+	SELECT @login_name = substring(@sec_user_name,@start+1,len(@sec_user_name)-@start)     
+	SELECT @sec_user_id = 0 
+	SELECT @sec_user_id = sec_user_id FROM mcr_dc_Prod.dbo.sec_user WHERE login_name = @login_name   
+  
+ BEGIN TRY  
+    BEGIN  
+    
+	
+   UPDATE Edee.[dbo].[anthem_recon_file]  
+    set load_rows = @load_rows,
+	imported_count = @imported_count,
+	modified_user_id = @sec_user_id ,
+	created_user_id = @sec_user_id 
+		WHERE anthem_recon_file_Id = @reconFile_id
+      
+   END  
+     
+ END TRY  
+ BEGIN CATCH  
+    
+ 		SET @Email_Subject = @NotificationType + ' - ' + @ProgramName + ' - ' + @ServerName 
+		SET @ProgramName = 'Finance Support'
+		SET @error_message = 'A database error occurred:'
+			+ CHAR(13) + CHAR(10)
+			+ 'Procedure Name: ' + @sp_name
+			+ CHAR(13) + CHAR(10)
+			+ 'Error Description: ' + ERROR_MESSAGE()
+			+ CHAR(13) + CHAR(10)
+			+ 'User: ' + @login_name
+		EXEC mcr_dc_prod.[dbo].[finance_email_notification] @sec_user_id, @error_message, @ProgramName, @sp_name
+  
+  ;THROW  
+ END CATCH  
+  
+ --RETURN 0  
+  
+END  
+
+we call anthem_recon_file_detail_insert
+
+USE [Edee]
+GO
+/****** Object:  StoredProcedure [dbo].[anthem_recon_file_detail_insert]    Script Date: 9/13/2026 10:25:55 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/*************************************************************************  
+Name:   [dbo].[anthem_recon_file_detail_insert]  
+Description: Updates File    
+Used by:    
+Test harness: EXEC [dbo].[anthem_recon_file_detail_insert] (...)  
+Execution time:   
+Created:  08/22/2025 Durgesh Alapati 
+
+**************************************************************************/  
+  
+ALTER      PROCEDURE [dbo].[anthem_recon_file_detail_insert]  
+
+    @reconFile_id INT
+AS  
+  
+BEGIN  
+ SET NOCOUNT ON  
+ 
+ DECLARE @sp_name	VARCHAR(50) = OBJECT_NAME(@@PROCID)
+ DECLARE @ServerName VARCHAR(100) = (SELECT @@SERVERNAME)
+ DECLARE @NotificationType VARCHAR(100)    
+ DECLARE @ProgramName VARCHAR(100) 
+ DECLARE @Email_Subject VARCHAR(300) = ''  
+ DECLARE	@error_message		VARCHAR(MAX),  
+			@dt					DATETIME		= GETDATE() ,
+			@sec_user_id		INT, 
+			@created_user_id	INT,
+			@sec_user_name		VARCHAR(50),    
+			@start				INT,    
+			@login_name			VARCHAR(50)    
+
+	SELECT @sec_user_name = suser_sname()   
+	SELECT @start = charindex('\',@sec_user_name) 
+	SELECT @login_name = substring(@sec_user_name,@start+1,len(@sec_user_name)-@start)     
+	SELECT @sec_user_id = 0   
+	SELECT @sec_user_id = sec_user_id FROM mcr_dc_Prod.dbo.sec_user WHERE login_name = @login_name   
+
+  
+  
+ BEGIN TRY  
+    BEGIN  
+      
+INSERT INTO dbo.anthem_recon_detail(
+	   --[anthem_recon_detail_id]
+	  [dcn]
+      ,[member_id]
+      ,[claim_type]
+      --,[claim_id]
+      --,[recon_tracking_status_id]
+      ,[pat_last_name]
+      ,[pat_first_name]
+      ,[pat_dob]
+      ,[case_number]
+      ,[group_number]
+      ,[its_ind]
+      ,[action_reason_code]
+      ,[allowed_amount]
+      ,[tot_approved_to_pay]
+      ,[copay_amount]
+      ,[deductible_amount]
+      ,[coins_amount]
+      ,[tot_charge_amount]
+      ,[item_code]
+      ,[prior_payment_amount]
+      ,[deb_cred_amount]
+      ,[ineligible_amount]
+      ,[surcharge_ind]
+      ,[tot_surcharge_amount]
+      ,[surcharge_member_amount]
+      ,[surcharge_anthem_amount]
+      ,[supplemental_amount]
+      ,[payee_code]
+      ,[adj_reason_code]
+      ,[tpa_837_ind]
+      ,[fund_initiated_adj_ind]
+      ,[last_processed_date]
+      ,[tpa_835_ind]
+      ,[processed_835_date]
+      ,[accelerated_pay_ind]
+      ,[seq_number]
+      ,[filename]
+      --,[created_date]
+      ,[created_user_id]
+      ,[modified_user_id]
+)
+SELECT rfs.[DCN]
+      ,rfs.[MEMB_ID]
+	   ,rfs.[CLM_TYP]
+	  --,c.claim_id
+	  --, 1--recon_tracking_status_id (Loaded)
+      ,rfs.[PAT_LAST_NME]
+      ,rfs.[PAT_FRST_NME]
+      ,rfs.[PAT_DOB]
+      ,rfs.[CLT_CASE]
+      ,rfs.[CLT_GROUP]
+      ,rfs.[ITS_IND]
+      ,rfs.[PAY_ACT_CDE]
+      ,rfs.[CLM_ALW_AMT]
+      ,rfs.[TOT_APPR_PAY]
+      ,rfs.[COPAY_AMT]
+      ,rfs.[DEDUCT_AMT]
+      ,rfs.[COINS_AMT]
+      ,rfs.[TOT_CHG_AMT]
+      ,rfs.[ITEM_CD]
+      ,rfs.[PRIOR_PAY]
+      ,rfs.[DEBIT_CREDIT]
+      ,rfs.[INELIG_AMT]
+      ,rfs.[SURG_CLM_IND]
+      ,rfs.[SRG_TOT_AMT]
+      ,rfs.[SRG_MEM_AMT]
+      ,rfs.[SRG_ATH_AMT]
+      ,rfs.[SUPP_DOL_AMT]
+      ,rfs.[PAYEE_CDE]
+      ,rfs.[ADJ_RSN_CDE]
+      ,rfs.[TPA_837_IND]
+      ,rfs.[FUND_INIT_IND]
+      ,rfs.[LST_PROC_DT]
+      ,rfs.[TPA_835_IND]
+      ,rfs.[DATE_835]
+      ,rfs.[ACC_PAY]
+      ,rfs.[CLM_SEQ]
+      ,rfs.[file_name]
+	   ,@sec_user_id
+	  ,@sec_user_id
+	  FROM dbo.anthem_recon_file_stage rfs	
+        where anthem_recon_file_id = @reconFile_id 
+      
+   END  
+     
+ END TRY  
+ BEGIN CATCH  
+    
+ 		SET @Email_Subject = @NotificationType + ' - ' + @ProgramName + ' - ' + @ServerName 
+		SET @ProgramName = 'Finance Support'
+		SET @error_message = 'A database error occurred:'
+			+ CHAR(13) + CHAR(10)
+			+ 'Procedure Name: ' + @sp_name
+			+ CHAR(13) + CHAR(10)
+			+ 'Error Description: ' + ERROR_MESSAGE()
+			+ CHAR(13) + CHAR(10)
+			+ 'User: ' + @login_name
+		EXEC mcr_dc_prod.[dbo].[finance_email_notification] @sec_user_id, @error_message, @ProgramName, @sp_name
+  
+  ;THROW  
+ END CATCH  
+  
+ --RETURN 0  
+  
+END  
 
